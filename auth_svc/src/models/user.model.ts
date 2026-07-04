@@ -1,4 +1,5 @@
 import mongoose, { Schema, Document } from 'mongoose';
+import bcrypt from "bcrypt";
 
 // Define the available roles in the system
 export type UserRole = 'SUPER_ADMIN' | 'NGO_ADMIN' | 'GROUND_WORKER' | 'RESIDENT';
@@ -21,7 +22,7 @@ const UserSchema: Schema = new Schema<IUser>(
   {
     name: { type: String, required: true, trim: true },
     email: { type: String, required: true, unique: true, lowercase: true, trim: true },
-    passwordHash: { type: String, required: true },
+    passwordHash: { type: String, required: true, select: false },
     phone: { type: String, required: true, trim: true },
     role: {
       type: String,
@@ -36,13 +37,28 @@ const UserSchema: Schema = new Schema<IUser>(
     isVerified: { type: Boolean, default: false },
     isActive: { type: Boolean, default: true },
   },
-  { 
-    timestamps: true 
+  {
+    timestamps: true
   }
 );
 
 // Indexes for high-throughput queries
-UserSchema.index({ email: 1 });
 UserSchema.index({ ngoId: 1 });
 
-export const User = mongoose.model<IUser>('User', UserSchema);
+UserSchema.pre<IUser>("save", async function () {
+  if (!this.isModified("passwordHash")) {
+    return;
+  }
+  try {
+    const salt = await bcrypt.genSalt(10);
+    this.passwordHash = await bcrypt.hash(this.passwordHash, salt);
+  } catch (error: any) {
+    throw new Error(error); // Throwing an error will safely halt the save operation
+  }
+});
+
+UserSchema.methods.comparePassword = async function (password: string) {
+  return await bcrypt.compare(password, this.password);
+}
+
+export const userModel = mongoose.model<IUser>('User', UserSchema);
