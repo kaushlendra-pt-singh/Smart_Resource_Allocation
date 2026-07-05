@@ -1,6 +1,7 @@
 import { userModel } from "../models/user.model.ts";
 import jwt from "jsonwebtoken";
 import type { Request, Response } from "express";
+import bcrypt from "bcrypt";
 
 
 //No refresh token rotation yet implemented.
@@ -113,4 +114,57 @@ const userRefreshTokenController = async (req: Request, res: Response): Promise<
     }
 }
 
-export { userRegistrationController, userRefreshTokenController };
+const userLoginController = async (req: Request, res: Response): Promise<Response> => {
+    try {
+
+        const { email, password } = req.body;
+        if (!email || !password) return res.status(400).json({ "message": "Provide both email and password!" });
+
+        const user = await userModel.findOne({ email }).select("+passwordHash");
+        if (!user) return res.status(404).json({ "message": "No user found!", "status": "failed" });
+        if (!user.isActive) return res.status(403).json({ message: "Account suspended!", status: "failed" });
+
+        const isPassValid = bcrypt.compare(password, user.passwordHash);
+        if (!isPassValid) return res.status(400).json({ message: "Invalid email or password!", status: "failed" });
+
+
+        const accessToken = jwt.sign(
+            { userId: user._id, role: user.role, ngoId: user.ngoId },
+            process.env.JWT_ACCESS_SECRET!,
+            { expiresIn: "15m" }
+        );
+
+        const refreshToken = jwt.sign(
+            { userId: user._id },
+            process.env.JWT_REFRESH_SECRET!,
+            { expiresIn: "7d" }
+        );
+        const cookieOptions = {
+            httpOnly: true,
+            secure: process.env.NODE_ENV === "production",
+            sameSite: "strict" as const,
+            maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
+        }
+        console.log(`User [${user.email}] logged in successfully.`);
+
+        return res
+            .cookie("refreshToken", refreshToken, cookieOptions)
+            .status(200)
+            .json({
+                status: "success",
+                user: {
+                    _id: user._id,
+                    email: user.email,
+                    name: user.name,
+                    role: user.role,
+                    isVerified: user.isVerified
+                },
+                accessToken
+            });
+    } catch (error) {
+        console.error("Error in user login:", error);
+        return res.status(500).json({ message: "Internal server error during login." });
+    }
+}
+
+export { userRegistrationController, userRefreshTokenController, userLoginController };
