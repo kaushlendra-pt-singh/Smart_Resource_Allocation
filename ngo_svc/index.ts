@@ -11,7 +11,7 @@ import connectToDB from "./src/config/db.ts";
 
 await connectToDB();
 
-const port = process.env.PORT! || 8000;
+const port = process.env.PORT! || 8001;
 app.listen(port, async () => {
-  console.log(`Auth Server running on port ${port}`);
+  console.log(`NGO Server running on port ${port}`);
 });
