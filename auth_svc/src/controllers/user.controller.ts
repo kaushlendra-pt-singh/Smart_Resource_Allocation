@@ -100,8 +100,8 @@ const userRefreshTokenController = async (req: Request, res: Response): Promise<
 
         const newAccessToken = jwt.sign(
             { userId: user._id, role: user.role, ngoid: user.ngoId },
-            process.env.JWT_REFRESH_SECRET!,
-            { expiresIn: "15m" }
+            process.env.JWT_ACCESS_SECRET!,
+            { expiresIn: "5m" }
         )
 
         return res.status(200).json({
@@ -131,7 +131,7 @@ const userLoginController = async (req: Request, res: Response): Promise<Respons
         const accessToken = jwt.sign(
             { userId: user._id, role: user.role, ngoId: user.ngoId },
             process.env.JWT_ACCESS_SECRET!,
-            { expiresIn: "15m" }
+            { expiresIn: "5m" }
         );
 
         const refreshToken = jwt.sign(
@@ -167,4 +167,63 @@ const userLoginController = async (req: Request, res: Response): Promise<Respons
     }
 }
 
-export { userRegistrationController, userRefreshTokenController, userLoginController };
+const userLogoutController = async (req: Request, res: Response): Promise<Response> => {
+    return res
+        .clearCookie("refreshToken", {
+            httpOnly: true,
+            secure: process.env.NODE_ENV === "production",
+            sameSite: "strict" as const
+        })
+        .status(200)
+        .json({ status: "success", message: "Logged out successfully." });
+}
+
+
+const getUserProfileController = async (req: Request, res: Response): Promise<Response> => {
+    try {
+        const id = req.user?._id;
+
+        // 1. Defend against missing middleware injection context
+        if (!id) {
+            return res.status(401).json({ message: "User context missing or unauthenticated.", status: "failed" });
+        }
+
+        // 2. Optimization: Strip away the password hash completely from the DB query return
+        const user = await userModel.findById(id).select("-passwordHash -refreshTokens");
+
+        if (!user) {
+            return res.status(404).json({ message: "User profile does not exist.", status: "failed" }); // 404 is more accurate than 401 here
+        }
+
+        // 3. Optional: Verify the account hasn't been locked while they held an active token
+        if (!user.isActive) {
+            return res.status(403).json({ message: "Account has been suspended.", status: "failed" });
+        }
+
+        // 4. Send back a clean data object wrapper
+        return res.status(200).json({
+            status: "success",
+            user: {
+                _id: user._id,
+                name: user.name,
+                email: user.email,
+                phone: user.phone,
+                role: user.role,
+                ngoId: user.ngoId,
+                isVerified: user.isVerified
+            }
+        });
+
+    } catch (error) {
+        console.error(`Error while fetching profile: ${error}`);
+        return res.status(500).json({ message: "Internal server error while fetching profile." });
+    }
+};
+
+export {
+    userRegistrationController,
+    userRefreshTokenController,
+    userLoginController,
+    userLogoutController,
+    getUserProfileController
+};
