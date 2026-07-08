@@ -5,7 +5,10 @@ import {
     userRefreshTokenController,
     userLoginController,
     userLogoutController,
-    getUserProfileController
+    getUserProfileController,
+    forgotPasswordController,
+    resetPasswordController,
+    deleteUserController
 } from "../controllers/user.controller.ts";
 import authMiddleware from "../middlewares/auth.middleware.ts";
 
@@ -17,5 +20,8 @@ authRoutes.post("/login", authLimiter, userLoginController);
 authRoutes.post("/refresh-token", authLimiter, userRefreshTokenController);
 authRoutes.post("/logout", authLimiter, userLogoutController);
 authRoutes.get("/me", authLimiter, authMiddleware, getUserProfileController);
+authRoutes.post("/forgot-password", authLimiter, forgotPasswordController);
+authRoutes.patch("/reset-password/:token", authLimiter, resetPasswordController);
+authRoutes.delete("/delete", authLimiter, authMiddleware, deleteUserController);
 
 export default authRoutes;

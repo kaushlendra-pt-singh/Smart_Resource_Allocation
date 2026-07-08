@@ -9,6 +9,8 @@ export interface IUser extends Document {
   name: string;
   email: string;
   passwordHash: string;
+  passwordResetToken?: string;
+  passwordResetExpires?: Date;
   phone: string;
   role: UserRole;
   ngoId: mongoose.Types.ObjectId | null; // Null for SUPER_ADMIN & standalone RESIDENTs
@@ -23,6 +25,8 @@ const UserSchema: Schema = new Schema<IUser>(
     name: { type: String, required: true, trim: true },
     email: { type: String, required: true, unique: true, lowercase: true, trim: true },
     passwordHash: { type: String, required: true, select: false },
+    passwordResetToken: { type: String, select: false },
+    passwordResetExpires: { type: Date, select: false },
     phone: { type: String, required: true, trim: true },
     role: {
       type: String,

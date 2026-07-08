@@ -2,9 +2,12 @@ import { userModel } from "../models/user.model.ts";
 import jwt from "jsonwebtoken";
 import type { Request, Response } from "express";
 import bcrypt from "bcrypt";
+import crypto from "crypto";
+import { sendEmail } from "../utils/sendEmail.ts";
 
 
 //No refresh token rotation yet implemented.
+//i mplement email smtp api on production instead of sandbox
 
 const userRegistrationController = async (req: Request, res: Response): Promise<Response> => {
     try {
@@ -178,7 +181,6 @@ const userLogoutController = async (req: Request, res: Response): Promise<Respon
         .json({ status: "success", message: "Logged out successfully." });
 }
 
-
 const getUserProfileController = async (req: Request, res: Response): Promise<Response> => {
     try {
         const id = req.user?._id;
@@ -220,10 +222,109 @@ const getUserProfileController = async (req: Request, res: Response): Promise<Re
     }
 };
 
+const forgotPasswordController = async (req: Request, res: Response): Promise<Response> => {
+    try {
+        const { email } = req.body;
+        if (!email) return res.status(400).json({ message: "Please provide an email address." });
+
+        const user = await userModel.findOne({ email });
+        if (!user) {
+            //imp wtf Security Tip: Return 200 even if the email doesn't exist to prevent email enumeration attacks
+            return res.status(200).json({ status: "success", message: "If an account exists, a reset link has been sent." });
+        }
+
+        // Generate a random 32-byte hex token
+        const resetToken = crypto.randomBytes(32).toString("hex");
+
+        // Hash the token to save it securely in the database
+        user.passwordResetToken = crypto.createHash("sha256").update(resetToken).digest("hex");
+        user.passwordResetExpires = new Date(Date.now() + 15 * 60 * 1000); // Expires in 15 minutes
+
+        await user.save({ validateBeforeSave: false });
+
+        // Construct reset URL string
+        const resetURL = `${req.protocol}://${req.get("host")}/api/auth/user/reset-password/${resetToken}`;
+        const message = `Forgot your password? Submit a PATCH request with your new password to:\n\n${resetURL}\n\nThis link is valid for 15 minutes.`;
+
+        try {
+            await sendEmail({
+                email: user.email,
+                subject: "Your Password Reset Token (Valid for 15 mins)",
+                message
+            });
+
+            return res.status(200).json({ status: "success", message: "Reset token sent to email!" });
+        } catch (err) {
+            user.passwordResetToken = undefined;
+            user.passwordResetExpires = undefined;
+            await user.save({ validateBeforeSave: false });
+            console.error(`Error while sending email: ${err}`);
+            return res.status(500).json({ message: "Error sending email. Try again later." });
+        }
+    } catch (error: any) {
+        console.error(`Error while forgot pass: ${error}`);
+        return res.status(500).json({ message: error.message });
+    }
+};
+
+const resetPasswordController = async (req: Request, res: Response): Promise<Response> => {
+    try {
+        const { password } = req.body;
+        if (!password) return res.status(400).json({ message: "Please provide your new password." });
+
+        // Hash the token coming from the URL parameters to match against the DB record
+        const tokenParam = req.params.token as string;
+        if (!tokenParam) {
+            return res.status(400).json({ message: "Invalid route request. Token parameter missing." });
+        }
+        const hashedToken = crypto.createHash("sha256").update(tokenParam).digest("hex");
+
+        // Find user by matched token and confirm expiration time is still in the future
+        const user = await userModel.findOne({
+            passwordResetToken: hashedToken,
+            passwordResetExpires: { $gt: new Date() }
+        }).select("+passwordHash"); // Remember to explicitly select the password field!
+
+        if (!user) {
+            return res.status(400).json({ message: "Token is invalid or has expired." });
+        }
+
+        // Set the new password (your pre("save") hook will automatically run and bcrypt hash this)
+        user.passwordHash = password;
+        user.passwordResetToken = undefined;
+        user.passwordResetExpires = undefined;
+        await user.save();
+
+        return res.status(200).json({ status: "success", message: "Password updated successfully. You can now login!" });
+    } catch (error: any) {
+        return res.status(500).json({ message: error.message });
+    }
+};
+
+const deleteUserController = async (req: Request, res: Response): Promise<Response> => {
+    try {
+        const userId = req.user?._id;
+
+        const deletedUser = await userModel.findByIdAndDelete(userId);
+        if (!deletedUser) return res.status(404).json({ message: "User not found." });
+
+        return res
+            .clearCookie("refreshToken", { httpOnly: true, secure: process.env.NODE_ENV === "production", sameSite: "strict" })
+            .status(200)
+            .json({ message: "User account permanently deleted from the system." });
+    } catch (error: any) {
+        console.error(`Error while deleting user: ${error}`);
+        return res.status(500).json({ message: error.message });
+    }
+};
+
 export {
     userRegistrationController,
     userRefreshTokenController,
     userLoginController,
     userLogoutController,
-    getUserProfileController
+    getUserProfileController,
+    forgotPasswordController,
+    resetPasswordController,
+    deleteUserController
 };
