@@ -16,6 +16,7 @@ export interface IUser extends Document {
   ngoId: mongoose.Types.ObjectId | null; // Null for SUPER_ADMIN & standalone RESIDENTs
   isVerified: boolean;                   // For NGO workers requiring admin approval
   isActive: boolean;                     // For account suspension/security
+  isGoogleUser: boolean;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -40,6 +41,7 @@ const UserSchema: Schema = new Schema<IUser>(
     },
     isVerified: { type: Boolean, default: false },
     isActive: { type: Boolean, default: true },
+    isGoogleUser: { type: Boolean, default: false },
   },
   {
     timestamps: true

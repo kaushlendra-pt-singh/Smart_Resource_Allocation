@@ -4,10 +4,16 @@ import type { Request, Response } from "express";
 import bcrypt from "bcrypt";
 import crypto from "crypto";
 import { sendEmail } from "../utils/sendEmail.ts";
+import { OAuth2Client } from "google-auth-library";
+
+
+const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
 
 //No refresh token rotation yet implemented.
 //i mplement email smtp api on production instead of sandbox
+//The route and working of googleAuthController is not tested yet.
+//and also not utilized the isgoogleuser field properly.
 
 const userRegistrationController = async (req: Request, res: Response): Promise<Response> => {
     try {
@@ -79,7 +85,7 @@ const userRegistrationController = async (req: Request, res: Response): Promise<
         console.error("Error in user registration", error);
         return res.status(500).json({ "message": "Internal server error in user registration." });
     }
-}
+};
 
 const userRefreshTokenController = async (req: Request, res: Response): Promise<Response> => {
     try {
@@ -115,7 +121,7 @@ const userRefreshTokenController = async (req: Request, res: Response): Promise<
         console.error("Error inside token rotation:", error);
         return res.status(500).json({ "message": "Internal server error in refresh token controller" });
     }
-}
+};
 
 const userLoginController = async (req: Request, res: Response): Promise<Response> => {
     try {
@@ -168,7 +174,7 @@ const userLoginController = async (req: Request, res: Response): Promise<Respons
         console.error("Error in user login:", error);
         return res.status(500).json({ message: "Internal server error during login." });
     }
-}
+};
 
 const userLogoutController = async (req: Request, res: Response): Promise<Response> => {
     return res
@@ -179,7 +185,7 @@ const userLogoutController = async (req: Request, res: Response): Promise<Respon
         })
         .status(200)
         .json({ status: "success", message: "Logged out successfully." });
-}
+};
 
 const getUserProfileController = async (req: Request, res: Response): Promise<Response> => {
     try {
@@ -318,6 +324,84 @@ const deleteUserController = async (req: Request, res: Response): Promise<Respon
     }
 };
 
+const googleAuthController = async (req: Request, res: Response): Promise<Response> => {
+
+    try {
+        const { idToken } = req.body;
+        if (!idToken) return res.status(400).json({ "status": "failed", "message": "Google id token is missing." });
+
+        // 1. Verify the token directly with Google's servers
+        const ticket = await client.verifyIdToken({
+            idToken,
+            audience: process.env.GOOGLE_CLIENT_ID,
+        });
+
+        const payload = ticket.getPayload();
+        if (!payload || !payload.email) {
+            return res.status(400).json({ message: "Invalid Google token payload." });
+        }
+
+        const { email, name, picture } = payload;
+
+        // 2. Check if the user already exists in your DB
+        let user = await userModel.findOne({ email });
+
+        if (!user) {
+            // Registration path: Create a new user account on the fly
+            // Since it's OAuth, we generate a random dummy password that passes DB validation
+            const randomPassword = crypto.randomBytes(16).toString("hex");
+
+            user = await userModel.create({
+                name,
+                email,
+                passwordHash: randomPassword,
+                role: "RESIDENT", // Default fallback role
+                ngoId: null,
+                isGoogleUser: true
+            });
+        }
+
+        // 3. Generate your standard platform tokens (matching your native login logic)
+        const accessToken = jwt.sign(
+            { userId: user._id, role: user.role, ngoId: user.ngoId },
+            process.env.JWT_ACCESS_SECRET!,
+            { expiresIn: "15m" }
+        );
+
+        const refreshToken = jwt.sign(
+            { userId: user._id },
+            process.env.JWT_REFRESH_SECRET!,
+            { expiresIn: "7d" }
+        );
+
+        // 4. Set the HTTP-Only cookie and respond
+        return res
+            .cookie("refreshToken", refreshToken, {
+                httpOnly: true,
+                secure: process.env.NODE_ENV === "production",
+                sameSite: "strict" as const,
+                maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+            })
+            .status(200)
+            .json({
+                status: "success",
+                message: "Google authentication successful.",
+                accessToken,
+                user: {
+                    _id: user._id,
+                    name: user.name,
+                    email: user.email,
+                    role: user.role,
+                }
+            });
+
+    } catch (error) {
+        console.error(`Google Auth Error: ${error}`);
+        return res.status(401).json({ message: "Google authentication failed. Token may be expired." });
+    }
+
+};
+
 export {
     userRegistrationController,
     userRefreshTokenController,
@@ -326,5 +410,6 @@ export {
     getUserProfileController,
     forgotPasswordController,
     resetPasswordController,
-    deleteUserController
+    deleteUserController,
+    googleAuthController
 };
