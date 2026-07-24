@@ -20,7 +20,7 @@ app.get("/api/auth/health",(req, res)=>{
     return res.status(200).json({"message":"Server is healthy"});
 });
 
-app.use("/api/auth/user", authRoutes);
+app.use("/api/auth", authRoutes);
 
 
 export default app;

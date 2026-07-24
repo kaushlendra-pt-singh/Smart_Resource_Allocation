@@ -1,21 +1,26 @@
 import jwt from "jsonwebtoken";
 import type { Request, Response, NextFunction } from "express";
 
-async function authMiddleware(req:Request, res:Response, next:NextFunction) {
+async function authMiddleware(req: Request, res: Response, next: NextFunction) {
 
     try {
         const token = req.cookies?.accessToken || req.headers.authorization?.split(" ")[1];
-        if(!token) return res.status(401).json({"message":"User not authorized!"});
+        if (!token) return res.status(401).json({ message: "User not authorized!" });
+
+        // 1. Update the expected JWT payload structure
         const decoded = jwt.verify(token, process.env.JWT_ACCESS_SECRET!) as {
-            userId: string;
+            _id: string;  // (Use userId if your login controller still signs it as userId)
             role: string;
-            ngoId: string | null;
+            joinedNGOs: string[]; // <-- Updated to array
         };
+
+        // 2. Map the array to the req.user object
         req.user = {
-            _id: decoded.userId, // Aligned with 'userId' from login/register controllers
+            _id: decoded._id, // Aligned with the JWT payload
             role: decoded.role,
-            ngoId: decoded.ngoId
+            joinedNGOs: decoded.joinedNGOs || [] // <-- Safely maps the array (with a fallback)
         };
+
         next();
     } catch (error: any) {
         console.error(`Error in auth middleware: ${error}`);

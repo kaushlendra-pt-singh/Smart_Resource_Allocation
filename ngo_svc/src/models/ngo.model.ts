@@ -9,6 +9,9 @@ export interface INGO extends Document {
     address: string;
     coordinates: [number, number]; // [longitude, latitude] for geospatial filtering
   };
+  registrationDocuments: [String];
+  ngoAdmins: mongoose.Types.ObjectId[];
+  ngoWorkers: mongoose.Types.ObjectId[];
   verificationStatus: 'PENDING' | 'APPROVED' | 'REJECTED'; // Handled by SUPER_ADMIN
   createdAt: Date;
   updatedAt: Date;
@@ -30,6 +33,9 @@ const NGOSchema: Schema = new Schema<INGO>(
         required: true,
       },
     },
+    registrationDocuments: [{ type: String, required: true }],
+    ngoAdmins: [{ type: Schema.Types.ObjectId, ref: "User", default: [] }],
+    ngoWorkers: [{ type: Schema.Types.ObjectId, ref: "User", default: [] }],
     verificationStatus: {
       type: String,
       enum: ['PENDING', 'APPROVED', 'REJECTED'],

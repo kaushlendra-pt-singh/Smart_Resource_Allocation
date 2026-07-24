@@ -1,6 +1,7 @@
 import express from "express";
 import cors from "cors";
 import cookieParser from "cookie-parser";
+import ngoRouter from "./routes/ngo.routes.ts";
 
 const app = express();
 app.use(express.json());
@@ -15,7 +16,7 @@ app.get("/api/ngo/health",(req, res)=>{
     return res.status(200).json({"message":"NGO Management Service is healthy"});
 });
 
-// app.use("/api/auth/user", authRoutes);
+app.use("/api/ngo", ngoRouter);
 
 
 export default app;

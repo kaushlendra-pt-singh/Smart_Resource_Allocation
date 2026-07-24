@@ -4,10 +4,12 @@
   "type": "module",
   "private": true,
   "devDependencies": {
+    "@types/axios": "^0.14.4",
     "@types/bun": "latest",
     "@types/cookie-parser": "^1.4.10",
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
+    "@types/express-rate-limit": "^6.0.2",
     "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "^26.1.0"
   },
@@ -15,10 +17,13 @@
     "typescript": "^5"
   },
   "dependencies": {
+    "axios": "^1.18.1",
+    "cloudinary": "^2.10.0",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
+    "express-rate-limit": "^8.5.2",
     "jsonwebtoken": "^9.0.3",
     "mongoose": "^9.7.3"
   }

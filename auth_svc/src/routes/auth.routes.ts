@@ -2,6 +2,8 @@ import express from "express";
 import { authLimiter } from "../middlewares/rate_limit.middleware.ts";
 import {
     userRegistrationController,
+    promoteFounderController,
+    promoteCoAdminController,
     userRefreshTokenController,
     userLoginController,
     userLogoutController,
@@ -13,17 +15,19 @@ import {
 } from "../controllers/user.controller.ts";
 import authMiddleware from "../middlewares/auth.middleware.ts";
 
-const authRoutes = express.Router();
+const authRouter = express.Router();
 
 
-authRoutes.post("/register", authLimiter, userRegistrationController);
-authRoutes.post("/google-auth", authLimiter, googleAuthController);
-authRoutes.post("/login", authLimiter, userLoginController);
-authRoutes.post("/refresh-token", authLimiter, userRefreshTokenController);
-authRoutes.post("/logout", authLimiter, userLogoutController);
-authRoutes.get("/me", authLimiter, authMiddleware, getUserProfileController);
-authRoutes.post("/forgot-password", authLimiter, forgotPasswordController);
-authRoutes.delete("/delete", authLimiter, authMiddleware, deleteUserController);
-authRoutes.patch("/reset-password/:token", authLimiter, resetPasswordController);
+authRouter.post("/register", authLimiter, userRegistrationController);
+authRouter.patch("/internal/promote-founder", promoteFounderController);
+authRouter.patch("/internal/promote-coadmin", promoteCoAdminController);
+authRouter.post("/google-auth", authLimiter, googleAuthController);
+authRouter.post("/login", authLimiter, userLoginController);
+authRouter.post("/refresh-token", authLimiter, userRefreshTokenController);
+authRouter.post("/logout", authLimiter, userLogoutController);
+authRouter.get("/me", authLimiter, authMiddleware, getUserProfileController);
+authRouter.post("/forgot-password", authLimiter, forgotPasswordController);
+authRouter.delete("/delete", authLimiter, authMiddleware, deleteUserController);
+authRouter.patch("/reset-password/:token", authLimiter, resetPasswordController);
 
-export default authRoutes;
+export default authRouter;

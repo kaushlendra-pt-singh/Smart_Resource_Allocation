@@ -10,6 +10,7 @@ import { OAuth2Client } from "google-auth-library";
 const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
 
+//No user role safety implemented yet. Create a otp or email check route for verification.
 //No refresh token rotation yet implemented.
 //i mplement email smtp api on production instead of sandbox
 //The route and working of googleAuthController is not tested yet.
@@ -17,16 +18,12 @@ const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
 const userRegistrationController = async (req: Request, res: Response): Promise<Response> => {
     try {
-        const { name, email, password, phone, role, ngoId, isActive, isVerified } = req.body;
+        const { name, email, password, phone } = req.body;
 
-        if (!name || !email || !password || !phone || !role) {
+        if (!name || !email || !password || !phone) {
             return res.status(400).json({ message: "All core fields are required.", status: "failed" });
         }
-        if (role === "SUPER_ADMIN") {
-            return res.status(400).json({ "message": "Bad manners!" });
-        }
 
-        const defaultIsVerified = role === "RESIDENT";
 
         const ifExists = await userModel.findOne({ email });
         if (ifExists) {
@@ -37,27 +34,25 @@ const userRegistrationController = async (req: Request, res: Response): Promise<
                 "status": "failed"
             });
         }
+
+
+
         const user = await userModel.create({
             name,
             email,
             passwordHash: password,
             phone,
-            role,
-            ngoId: role === "SUPER_ADMIN" || role === "RESIDENT" ? null : ngoId,
-            isActive,
-            isVerified: defaultIsVerified
+            role: 'RESIDENT',
+            joinedNGOs: []
         });
-        const accessToken = jwt.sign(
-            { userId: user._id, role: user.role, ngoId: user.ngoId },
-            process.env.JWT_ACCESS_SECRET!,
-            { expiresIn: '5m' }
+        //Extract or populate the ids from mongoose objects
+        // const ngoIdsArray = (user.joinedNGOs || [])
+        const ngoIdsArray = (user.joinedNGOs || []).map(org =>
+            typeof org === 'string' ? org : (org.ngoId?.toString() || org.toString())
         );
 
-        const refreshToken = jwt.sign(
-            { userId: user._id },
-            process.env.JWT_REFRESH_SECRET!,
-            { expiresIn: '7d' }
-        );
+        const accessToken = user.generateAccessToken();
+        const refreshToken = user.generateRefreshToken();
 
         console.log("User created successfully.");
         const cookieOptions = {
@@ -77,13 +72,114 @@ const userRegistrationController = async (req: Request, res: Response): Promise<
                     email: user.email,
                     name: user.name,
                     role: user.role,
-                    isVerified: user.isVerified
+                    joinedNGOs: user.joinedNGOs,
+                    verificationStatus: 'APPROVED'
                 },
                 accessToken
             });
     } catch (error: any) {
         console.error("Error in user registration", error);
         return res.status(500).json({ "message": "Internal server error in user registration." });
+    }
+};
+
+const promoteFounderController = async (req: Request, res: Response): Promise<Response> => {
+    try {
+        // 1. Verify Inter-Service Security
+        const internalApiKey = req.headers["x-internal-key"];
+        if (internalApiKey !== process.env.INTERNAL_API_KEY) {
+            return res.status(403).json({
+                status: "failed",
+                message: "Forbidden: Access restricted to internal services."
+            });
+        }
+
+        const { userId, ngoId } = req.body;
+
+        if (!userId || !ngoId) {
+            return res.status(400).json({
+                status: "failed",
+                message: "Both userId and ngoId are required."
+            });
+        }
+
+        // 2. Fetch User
+        const user = await userModel.findById(userId);
+        if (!user) {
+            return res.status(404).json({
+                status: "failed",
+                message: "Founder user account not found."
+            });
+        }
+
+        // 3. Promote Role & Link NGO
+        user.role = "NGO_ADMIN";
+
+        const alreadyJoined = user.joinedNGOs.some(id => id.toString() === ngoId.toString());
+        if (!alreadyJoined) {
+            user.joinedNGOs.push(ngoId);
+        }
+
+        await user.save({ validateBeforeSave: false });
+
+        return res.status(200).json({
+            status: "success",
+            message: "Founder successfully promoted to NGO_ADMIN and linked to NGO."
+        });
+
+    } catch (error: any) {
+        console.error("Error in promoteFounderController:", error);
+        return res.status(500).json({ status: "failed", message: "Internal server error promoting founder." });
+    }
+};
+
+const promoteCoAdminController = async (req: Request, res: Response): Promise<Response> => {
+    try {
+        // 1. Verify Inter-Service Security
+        const internalApiKey = req.headers["x-internal-key"];
+        if (internalApiKey !== process.env.INTERNAL_API_KEY) {
+            return res.status(403).json({
+                status: "failed",
+                message: "Forbidden: Access restricted to internal services."
+            });
+        }
+
+        const { targetUserId, ngoId } = req.body;
+
+        if (!targetUserId || !ngoId) {
+            return res.status(400).json({
+                status: "failed",
+                message: "Both targetUserId and ngoId are required."
+            });
+        }
+
+        // 2. Fetch target user
+        const user = await userModel.findById(targetUserId);
+        if (!user) {
+            return res.status(404).json({
+                status: "failed",
+                message: "Target user not found."
+            });
+        }
+
+        // 3. Update Role & Link NGO
+        user.role = "NGO_ADMIN";
+
+        const alreadyJoined = user.joinedNGOs.some(id => id.toString() === ngoId.toString());
+        if (!alreadyJoined) {
+            user.joinedNGOs.push(ngoId);
+        }
+
+        await user.save({ validateBeforeSave: false });
+
+        return res.status(200).json({
+            status: "success",
+            message: `User (${targetUserId}) successfully promoted to NGO_ADMIN for NGO ${ngoId}.`
+        });
+
+    } catch (error: any) {
+        console.error("Error in promoteCoAdminController:", error);
+        return res.status(500).json({ status: "failed", message: "Internal server error promoting co-admin." });
     }
 };
 
@@ -107,11 +203,11 @@ const userRefreshTokenController = async (req: Request, res: Response): Promise<
             return res.status(403).json({ "message": "This Account has been suspended!" });
         }
 
-        const newAccessToken = jwt.sign(
-            { userId: user._id, role: user.role, ngoid: user.ngoId },
-            process.env.JWT_ACCESS_SECRET!,
-            { expiresIn: "5m" }
-        )
+        const ngoIdsArray = (user.joinedNGOs || [])
+            .map(org => org.ngoId?.toString())
+            .filter((id): id is string => Boolean(id));
+
+        const newAccessToken = user.generateAccessToken();
 
         return res.status(200).json({
             status: "success",
@@ -133,21 +229,17 @@ const userLoginController = async (req: Request, res: Response): Promise<Respons
         if (!user) return res.status(404).json({ "message": "No user found!", "status": "failed" });
         if (!user.isActive) return res.status(403).json({ message: "Account suspended!", status: "failed" });
 
-        const isPassValid = bcrypt.compare(password, user.passwordHash);
+        const isPassValid = await bcrypt.compare(password, user.passwordHash);
         if (!isPassValid) return res.status(400).json({ message: "Invalid email or password!", status: "failed" });
 
 
-        const accessToken = jwt.sign(
-            { userId: user._id, role: user.role, ngoId: user.ngoId },
-            process.env.JWT_ACCESS_SECRET!,
-            { expiresIn: "5m" }
-        );
+        const ngoIdsArray = (user.joinedNGOs || [])
+            .map(org => org.ngoId?.toString())
+            .filter((id): id is string => Boolean(id));
 
-        const refreshToken = jwt.sign(
-            { userId: user._id },
-            process.env.JWT_REFRESH_SECRET!,
-            { expiresIn: "7d" }
-        );
+        const accessToken = user.generateAccessToken();
+
+        const refreshToken = user.generateRefreshToken();
         const cookieOptions = {
             httpOnly: true,
             secure: process.env.NODE_ENV === "production",
@@ -166,7 +258,8 @@ const userLoginController = async (req: Request, res: Response): Promise<Respons
                     email: user.email,
                     name: user.name,
                     role: user.role,
-                    isVerified: user.isVerified
+                    joinedNGOs: user.joinedNGOs,
+                    verificationStatus: user.verificationStatus
                 },
                 accessToken
             });
@@ -217,8 +310,8 @@ const getUserProfileController = async (req: Request, res: Response): Promise<Re
                 email: user.email,
                 phone: user.phone,
                 role: user.role,
-                ngoId: user.ngoId,
-                isVerified: user.isVerified
+                joinedNGOs: user.joinedNGOs,
+                verificationStatus: user.verificationStatus
             }
         });
 
@@ -249,7 +342,7 @@ const forgotPasswordController = async (req: Request, res: Response): Promise<Re
         await user.save({ validateBeforeSave: false });
 
         // Construct reset URL string
-        const resetURL = `${req.protocol}://${req.get("host")}/api/auth/user/reset-password/${resetToken}`;
+        const resetURL = `${req.protocol}://${req.get("host")}/api/auth/reset-password/${resetToken}`;
         const message = `Forgot your password? Submit a PATCH request with your new password to:\n\n${resetURL}\n\nThis link is valid for 15 minutes.`;
 
         try {
@@ -362,17 +455,13 @@ const googleAuthController = async (req: Request, res: Response): Promise<Respon
         }
 
         // 3. Generate your standard platform tokens (matching your native login logic)
-        const accessToken = jwt.sign(
-            { userId: user._id, role: user.role, ngoId: user.ngoId },
-            process.env.JWT_ACCESS_SECRET!,
-            { expiresIn: "15m" }
-        );
+        const ngoIdsArray = (user.joinedNGOs || [])
+            .map(org => org.ngoId?.toString())
+            .filter((id): id is string => Boolean(id));
 
-        const refreshToken = jwt.sign(
-            { userId: user._id },
-            process.env.JWT_REFRESH_SECRET!,
-            { expiresIn: "7d" }
-        );
+        const accessToken = user.generateAccessToken();
+
+        const refreshToken = user.generateRefreshToken();
 
         // 4. Set the HTTP-Only cookie and respond
         return res
@@ -404,6 +493,8 @@ const googleAuthController = async (req: Request, res: Response): Promise<Respon
 
 export {
     userRegistrationController,
+    promoteFounderController,
+    promoteCoAdminController,
     userRefreshTokenController,
     userLoginController,
     userLogoutController,

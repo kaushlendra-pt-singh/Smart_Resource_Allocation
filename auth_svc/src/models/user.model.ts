@@ -1,8 +1,15 @@
 import mongoose, { Schema, Document } from 'mongoose';
 import bcrypt from "bcrypt";
+import jwt from "jsonwebtoken";
 
 // Define the available roles in the system
 export type UserRole = 'SUPER_ADMIN' | 'NGO_ADMIN' | 'GROUND_WORKER' | 'RESIDENT';
+export type verificationTypes = 'NONE' | 'PENDING' | 'APPROVED' | 'REJECTED';
+
+export interface IJoinedNGO {
+    ngoId: mongoose.Types.ObjectId;
+    roleInNGO: 'NGO_ADMIN' | 'GROUND_WORKER' | 'VOLUNTEER';
+}
 
 // TS Interface representing the User Document
 export interface IUser extends Document {
@@ -14,11 +21,15 @@ export interface IUser extends Document {
   phone: string;
   role: UserRole;
   ngoId: mongoose.Types.ObjectId | null; // Null for SUPER_ADMIN & standalone RESIDENTs
-  isVerified: boolean;                   // For NGO workers requiring admin approval
+  verificationStatus: verificationTypes;                   // For NGO workers requiring admin approval
   isActive: boolean;                     // For account suspension/security
   isGoogleUser: boolean;
+  joinedNGOs: IJoinedNGO[];
   createdAt: Date;
   updatedAt: Date;
+  comparePassword(password: string): Promise<boolean>;
+  generateAccessToken(): string;
+  generateRefreshToken(): string;
 }
 
 const UserSchema: Schema = new Schema<IUser>(
@@ -33,13 +44,24 @@ const UserSchema: Schema = new Schema<IUser>(
       type: String,
       enum: ['SUPER_ADMIN', 'NGO_ADMIN', 'GROUND_WORKER', 'RESIDENT'],
       required: true,
+      default: 'RESIDENT'
     },
-    ngoId: {
-      type: Schema.Types.ObjectId,
-      ref: 'NGO',
-      default: null,
+    joinedNGOs: [
+        {
+            _id: false, // Prevents Mongoose from generating an extra sub-id for every entry
+            ngoId: { type: Schema.Types.ObjectId, ref: 'NGO', required: true },
+            roleInNGO: { 
+                type: String, 
+                enum: ['NGO_ADMIN', 'GROUND_WORKER', 'VOLUNTEER'], 
+                required: true
+            }
+        }
+    ],
+    verificationStatus: {
+      type: String,
+      enum: ['NONE', 'PENDING', 'APPROVED', 'REJECTED'],
+      default: 'PENDING'
     },
-    isVerified: { type: Boolean, default: false },
     isActive: { type: Boolean, default: true },
     isGoogleUser: { type: Boolean, default: false },
   },
@@ -64,7 +86,33 @@ UserSchema.pre<IUser>("save", async function () {
 });
 
 UserSchema.methods.comparePassword = async function (password: string) {
-  return await bcrypt.compare(password, this.password);
+  return await bcrypt.compare(password, this.passwordHash);
 }
+
+UserSchema.methods.generateAccessToken = function (this: IUser): string {
+    const ngoIds = (this.joinedNGOs || []).map((org) => org.ngoId.toString());
+
+    return jwt.sign(
+        {
+            _id: this._id.toString(),
+            email: this.email,
+            role: this.role,
+            joinedNGOs: ngoIds
+        },
+        process.env.JWT_ACCESS_SECRET!,
+        { expiresIn: "45m" }
+    );
+};
+
+// 2. Concrete Refresh Token Method
+UserSchema.methods.generateRefreshToken = function (this: IUser): string {
+    return jwt.sign(
+        {
+            userId: this._id.toString()
+        },
+        process.env.JWT_REFRESH_SECRET!,
+        { expiresIn: "7d" }
+    );
+};
 
 export const userModel = mongoose.model<IUser>('User', UserSchema);
