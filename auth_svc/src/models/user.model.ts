@@ -42,7 +42,7 @@ const UserSchema: Schema = new Schema<IUser>(
     phone: { type: String, required: true, trim: true },
     role: {
       type: String,
-      enum: ['SUPER_ADMIN', 'NGO_ADMIN', 'GROUND_WORKER', 'RESIDENT'],
+      enum: ['SUPER_ADMIN', 'NGO_ADMIN', 'GROUND_WORKER', 'RESIDENT', 'VOLUNTEER'],
       required: true,
       default: 'RESIDENT'
     },
@@ -90,7 +90,9 @@ UserSchema.methods.comparePassword = async function (password: string) {
 }
 
 UserSchema.methods.generateAccessToken = function (this: IUser): string {
-    const ngoIds = (this.joinedNGOs || []).map((org) => org.ngoId.toString());
+    const ngoIds = (this.joinedNGOs || [])
+        .filter((org) => Boolean(org && org.ngoId)) // Ensure org and org.ngoId exist
+        .map((org) => org.ngoId.toString());
 
     return jwt.sign(
         {

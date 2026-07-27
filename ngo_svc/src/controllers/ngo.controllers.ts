@@ -157,15 +157,7 @@ export const verifyNGOController = async (req: Request, res: Response): Promise<
             });
         }
 
-        // 3. Update Status
-        ngo.verificationStatus = status;
-        const hasFounder = ngo.ngoAdmins.some((id) => id.toString() === ngo.adminId.toString());
-        if (!hasFounder) {
-            ngo.ngoAdmins.push(ngo.adminId);
-        }
-        await ngo.save();
-
-        // 4. Inter-Service Sync: If Approved, promote the founding applicant in auth_svc
+        // 3. Inter-Service Sync: Call auth_svc FIRST if approving
         if (status === 'APPROVED') {
             try {
                 await axios.patch(
@@ -177,17 +169,32 @@ export const verifyNGOController = async (req: Request, res: Response): Promise<
                     {
                         headers: {
                             "x-internal-key": process.env.INTERNAL_API_KEY
-                        }
+                        },
+                        timeout: 5000 // 5-second timeout to prevent requests from hanging indefinitely
                     }
                 );
             } catch (syncError: any) {
-                console.error("Failed to sync promotion with auth_svc:", syncError);
+                console.error("Failed to sync promotion with auth_svc:", syncError?.response?.data || syncError.message);
+
+                // Return immediately without saving changes to NGO in database
                 return res.status(502).json({
                     status: "failed",
-                    message: "NGO status updated to APPROVED, but failed to promote user in Auth Service."
+                    message: "Failed to promote founder in Auth Service. NGO status was NOT updated."
                 });
             }
         }
+
+        // 4. Update In-Memory NGO State & Save ONLY after successful sync or rejection
+        ngo.verificationStatus = status;
+
+        if (status === 'APPROVED') {
+            const hasFounder = ngo.ngoAdmins.some((id) => id.toString() === ngo.adminId.toString());
+            if (!hasFounder) {
+                ngo.ngoAdmins.push(ngo.adminId);
+            }
+        }
+
+        await ngo.save(); // Clean DB write!
 
         return res.status(200).json({
             status: "success",
@@ -276,3 +283,83 @@ export const addCoAdminController = async (req: Request, res: Response): Promise
         return res.status(500).json({ status: "failed", message: "Internal server error adding co-admin." });
     }
 };
+
+export const addMemberController = async (req: Request, res: Response): Promise<Response> => {
+    try {
+        const { ngoId } = req.params;
+        const { targetUserIdentifier, roleInNGO } = req.body;
+        if (!targetUserIdentifier || !roleInNGO) {
+            return res.status(200).json({ status: "failed", message: "User and its role is both required." });
+        }
+        const allowedRoles = ["NGO_ADMIN", "GROUND_WORKER", "VOLUNTEER"];
+        if (!allowedRoles.includes(roleInNGO)) {
+            return res.status(400).json({
+                status: "failed",
+                message: `Invalid role. Allowed roles are: ${allowedRoles.join(', ')}`
+            });
+        }
+
+
+        const ngo = await ngoModel.findById(ngoId);
+        if (!ngo) {
+            return res.status(404).json({ status: "failed", message: "NGO not found." });
+        }
+        if (ngo.verificationStatus != "APPROVED") {
+            return res.status(400).json({
+                status: "failed",
+                message: "Cannot add members to an unverified or rejected NGO."
+            });
+        }
+        const isNgoAdmin = ngo.ngoAdmins.some(id => id.toString() === req.user!._id);
+        const isSuperAdmin = req.user!.role === 'SUPER_ADMIN';
+        if (!isNgoAdmin && !isSuperAdmin) {
+            return res.status(403).json({
+                status: "failed",
+                message: "Forbidden: You are not an admin of this specific NGO."
+            });
+        }
+        
+        let syncResponse;
+        try {
+            syncResponse = await axios.patch(
+                `${process.env.AUTH_SERVICE_URL}/api/auth/internal/add-joined-ngo`,
+                {
+                    targetUserIdentifier,
+                    ngoId: ngo._id,
+                    roleInNGO
+                },
+                {
+                    headers: { "x-internal-key": process.env.INTERNAL_API_KEY },
+                    timeout: 8000
+                }
+            );
+        } catch (syncError: any) {
+            console.error("Failed to add NGO to user in auth_svc:", syncError?.response?.data || syncError.message);
+            return res.status(syncError?.response?.status || 502).json({
+                status: "failed",
+                message: syncError?.response?.data?.message || "Failed to update member record in Auth Service."
+            });
+        }
+
+        const { targetUserId } = syncResponse.data.data;
+        if (roleInNGO === "NGO_ADMIN") {
+            const isAdmin = ngo.ngoAdmins.some(id => id.toString() === targetUserId);
+            if (!isAdmin) ngo.ngoAdmins.push(targetUserId);
+        } else {
+            const isWorkerAlready = ngo.ngoWorkers.some(id => id.toString() === targetUserId);
+            if (!isWorkerAlready) ngo.ngoWorkers.push(targetUserId);
+        }
+
+        await ngo.save();
+
+        return res.status(200).json({
+            status: "success",
+            message: `User successfully added as ${roleInNGO}.`,
+            ngo
+        });
+
+    } catch (error) {
+        console.error("Error in addMemberController:", error);
+        return res.status(500).json({ status: "failed", message: "Internal server error adding member." });
+    }
+}

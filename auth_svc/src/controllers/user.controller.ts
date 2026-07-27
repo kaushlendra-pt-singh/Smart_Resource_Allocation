@@ -85,14 +85,6 @@ const userRegistrationController = async (req: Request, res: Response): Promise<
 
 const promoteFounderController = async (req: Request, res: Response): Promise<Response> => {
     try {
-        // 1. Verify Inter-Service Security
-        const internalApiKey = req.headers["x-internal-key"];
-        if (internalApiKey !== process.env.INTERNAL_API_KEY) {
-            return res.status(403).json({
-                status: "failed",
-                message: "Forbidden: Access restricted to internal services."
-            });
-        }
 
         const { userId, ngoId } = req.body;
 
@@ -117,7 +109,7 @@ const promoteFounderController = async (req: Request, res: Response): Promise<Re
 
         const alreadyJoined = user.joinedNGOs.some(id => id.toString() === ngoId.toString());
         if (!alreadyJoined) {
-            user.joinedNGOs.push(ngoId);
+            user.joinedNGOs.push({ngoId, roleInNGO:"NGO_ADMIN"});
         }
 
         await user.save({ validateBeforeSave: false });
@@ -135,14 +127,6 @@ const promoteFounderController = async (req: Request, res: Response): Promise<Re
 
 const promoteCoAdminController = async (req: Request, res: Response): Promise<Response> => {
     try {
-        // 1. Verify Inter-Service Security
-        const internalApiKey = req.headers["x-internal-key"];
-        if (internalApiKey !== process.env.INTERNAL_API_KEY) {
-            return res.status(403).json({
-                status: "failed",
-                message: "Forbidden: Access restricted to internal services."
-            });
-        }
 
         const { targetUserId, ngoId } = req.body;
 
@@ -180,6 +164,41 @@ const promoteCoAdminController = async (req: Request, res: Response): Promise<Re
     } catch (error: any) {
         console.error("Error in promoteCoAdminController:", error);
         return res.status(500).json({ status: "failed", message: "Internal server error promoting co-admin." });
+    }
+};
+
+const addCoWorkerController = async (req: Request, res: Response): Promise<Response> => {
+    try {
+
+        const { targetUserIdentifier, ngoId, roleInNGO } = req.body;
+        const user = await userModel.findById(targetUserIdentifier);
+        if (!user) {
+            return res.status(404).json({ status: "failed", message: "User not found." });
+        }
+
+        const existingNGOIndex = user.joinedNGOs.findIndex(
+            (item) => item.ngoId.toString() === ngoId.toString()
+        );
+
+        if (existingNGOIndex !== -1) {
+            // Update role if already joined, or reject
+            user.joinedNGOs[existingNGOIndex]!.roleInNGO = roleInNGO;
+            user.role = roleInNGO;
+        } else {
+            // Add new membership entry
+            user.joinedNGOs.push({ ngoId, roleInNGO });
+            user.role = roleInNGO;
+        }
+
+        await user.save();
+
+        return res.status(200).json({
+            status: "success",
+            data: { targetUserId: user._id.toString() }
+        });
+    } catch (error: any) {
+        console.error("Error in addJoinedNGOInternalController:", error);
+        return res.status(500).json({ status: "failed", message: "Internal server error updating user NGO membership." });
     }
 };
 
@@ -232,10 +251,6 @@ const userLoginController = async (req: Request, res: Response): Promise<Respons
         const isPassValid = await bcrypt.compare(password, user.passwordHash);
         if (!isPassValid) return res.status(400).json({ message: "Invalid email or password!", status: "failed" });
 
-
-        const ngoIdsArray = (user.joinedNGOs || [])
-            .map(org => org.ngoId?.toString())
-            .filter((id): id is string => Boolean(id));
 
         const accessToken = user.generateAccessToken();
 
@@ -495,6 +510,7 @@ export {
     userRegistrationController,
     promoteFounderController,
     promoteCoAdminController,
+    addCoWorkerController,
     userRefreshTokenController,
     userLoginController,
     userLogoutController,

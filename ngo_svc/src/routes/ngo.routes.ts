@@ -6,46 +6,51 @@ import {
     getUploadSignatureController,
     verifyNGOController,
     getPendingNGOsController,
-    addCoAdminController
+    addCoAdminController,
+    addMemberController
 } from "../controllers/ngo.controllers.ts";
 
-import {verifyToken, requireRoles} from "../middlewares/auth.middleware.ts";
+import { authMiddleWare, requireRoles } from "../middlewares/auth.middleware.ts";
 
 const ngoRouter = express.Router();
 
 //these routes are not tested yet
-ngoRouter.post("/register",
+ngoRouter.post(
+    "/register",
     rateLimiter,
-    verifyToken,
+    authMiddleWare,
     registerNGOController
 );
 
-ngoRouter.get("/upload-signature",
-    verifyToken,
+ngoRouter.get(
+    "/upload-signature",
     rateLimiter,
+    authMiddleWare,
     getUploadSignatureController
 );
 
 ngoRouter.get(
     "/pending",
-    verifyToken,
+    rateLimiter,
+    authMiddleWare,
     requireRoles(['SUPER_ADMIN']),
     getPendingNGOsController
 );
 
 ngoRouter.patch(
     "/:ngoId/verify",
-    verifyToken,
+    rateLimiter,
+    authMiddleWare,
     requireRoles(['SUPER_ADMIN']),
     verifyNGOController
 );
 
 ngoRouter.post(
-    "/:ngoId/add-admin",
+    "/:ngoId/add-worker",
     rateLimiter,
-    verifyToken,
+    authMiddleWare,
     requireRoles(['NGO_ADMIN', 'SUPER_ADMIN']),
-    addCoAdminController
+    addMemberController
 );
 
 export default ngoRouter;

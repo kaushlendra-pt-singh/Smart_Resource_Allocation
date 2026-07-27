@@ -3,7 +3,6 @@ import { authLimiter } from "../middlewares/rate_limit.middleware.ts";
 import {
     userRegistrationController,
     promoteFounderController,
-    promoteCoAdminController,
     userRefreshTokenController,
     userLoginController,
     userLogoutController,
@@ -11,16 +10,18 @@ import {
     forgotPasswordController,
     resetPasswordController,
     deleteUserController,
-    googleAuthController
+    googleAuthController,
+    addCoWorkerController
 } from "../controllers/user.controller.ts";
 import authMiddleware from "../middlewares/auth.middleware.ts";
+import { verifyInternalKey } from "../middlewares/verifyinternalKey.ts";
 
 const authRouter = express.Router();
 
 
 authRouter.post("/register", authLimiter, userRegistrationController);
-authRouter.patch("/internal/promote-founder", promoteFounderController);
-authRouter.patch("/internal/promote-coadmin", promoteCoAdminController);
+authRouter.patch("/internal/promote-founder", verifyInternalKey, promoteFounderController);
+authRouter.patch("/internal/add-joined-ngo", verifyInternalKey, addCoWorkerController);
 authRouter.post("/google-auth", authLimiter, googleAuthController);
 authRouter.post("/login", authLimiter, userLoginController);
 authRouter.post("/refresh-token", authLimiter, userRefreshTokenController);
