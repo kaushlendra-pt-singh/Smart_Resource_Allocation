@@ -12,7 +12,8 @@
     "@types/express": "^5.0.6",
     "@types/express-rate-limit": "^6.0.2",
     "@types/jsonwebtoken": "^9.0.10",
-    "@types/nodemailer": "^8.0.1"
+    "@types/nodemailer": "^8.0.1",
+    "@types/redis": "^4.0.11"
   },
   "peerDependencies": {
     "typescript": "^5"
@@ -27,6 +28,7 @@
     "google-auth-library": "^10.9.0",
     "jsonwebtoken": "^9.0.3",
     "mongoose": "^9.7.3",
-    "nodemailer": "^9.0.3"
+    "nodemailer": "^9.0.3",
+    "redis": "^6.1.0"
   }
 }

@@ -7,7 +7,6 @@ declare global {
       user?: {
         _id: string;
         role?: string;
-        joinedNGOs: string[];
       };
     }
   }

@@ -8,8 +8,10 @@ dotenv.config({ path: "./.env" });
 
 import app from "./src/app.ts";
 import connectToDB from "./src/config/db.ts";
+import { connectRedis } from "./src/config/redis.ts";
 
 await connectToDB();
+await connectRedis();
 
 const port = process.env.PORT! || 8000;
 app.listen(port, async () => {

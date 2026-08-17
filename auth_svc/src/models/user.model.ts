@@ -90,16 +90,11 @@ UserSchema.methods.comparePassword = async function (password: string) {
 }
 
 UserSchema.methods.generateAccessToken = function (this: IUser): string {
-    const ngoIds = (this.joinedNGOs || [])
-        .filter((org) => Boolean(org && org.ngoId)) // Ensure org and org.ngoId exist
-        .map((org) => org.ngoId.toString());
-
     return jwt.sign(
         {
             _id: this._id.toString(),
             email: this.email,
-            role: this.role,
-            joinedNGOs: ngoIds
+            role: this.role
         },
         process.env.JWT_ACCESS_SECRET!,
         { expiresIn: "45m" }

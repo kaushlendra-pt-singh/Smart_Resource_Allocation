@@ -1,5 +1,5 @@
 import express from "express";
-import { authLimiter } from "../middlewares/rate_limit.middleware.ts";
+import { rateLimiter } from "../middlewares/rate_limit.middleware.ts";
 import {
     userRegistrationController,
     promoteFounderController,
@@ -19,16 +19,16 @@ import { verifyInternalKey } from "../middlewares/verifyinternalKey.ts";
 const authRouter = express.Router();
 
 
-authRouter.post("/register", authLimiter, userRegistrationController);
+authRouter.post("/register", rateLimiter, userRegistrationController);
 authRouter.patch("/internal/promote-founder", verifyInternalKey, promoteFounderController);
 authRouter.patch("/internal/add-joined-ngo", verifyInternalKey, addCoWorkerController);
-authRouter.post("/google-auth", authLimiter, googleAuthController);
-authRouter.post("/login", authLimiter, userLoginController);
-authRouter.post("/refresh-token", authLimiter, userRefreshTokenController);
-authRouter.post("/logout", authLimiter, userLogoutController);
-authRouter.get("/me", authLimiter, authMiddleware, getUserProfileController);
-authRouter.post("/forgot-password", authLimiter, forgotPasswordController);
-authRouter.delete("/delete", authLimiter, authMiddleware, deleteUserController);
-authRouter.patch("/reset-password/:token", authLimiter, resetPasswordController);
+authRouter.post("/google-auth", rateLimiter, googleAuthController);
+authRouter.post("/login", rateLimiter, userLoginController);
+authRouter.post("/refresh-token", rateLimiter, userRefreshTokenController);
+authRouter.post("/logout", rateLimiter, userLogoutController);
+authRouter.get("/me", rateLimiter, authMiddleware, getUserProfileController);
+authRouter.post("/forgot-password", rateLimiter, forgotPasswordController);
+authRouter.delete("/delete", rateLimiter, authMiddleware, deleteUserController);
+authRouter.patch("/reset-password/:token", rateLimiter, resetPasswordController);
 
 export default authRouter;
