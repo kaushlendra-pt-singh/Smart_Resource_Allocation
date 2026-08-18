@@ -11,7 +11,8 @@
     "@types/express": "^5.0.6",
     "@types/express-rate-limit": "^6.0.2",
     "@types/jsonwebtoken": "^9.0.10",
-    "@types/node": "^26.1.0"
+    "@types/node": "^26.1.0",
+    "@types/redis": "^4.0.11"
   },
   "peerDependencies": {
     "typescript": "^5"
@@ -25,6 +26,7 @@
     "express": "^5.2.1",
     "express-rate-limit": "^8.5.2",
     "jsonwebtoken": "^9.0.3",
-    "mongoose": "^9.7.3"
+    "mongoose": "^9.7.3",
+    "redis": "^6.2.1"
   }
 }

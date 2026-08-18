@@ -1,6 +1,8 @@
 import ngoModel from "../models/ngo.model.ts";
 import type { Request, Response } from "express";
 import { v2 as cloudinary } from "cloudinary";
+import { safeRedis } from "../config/redis.ts";
+import { RedisKeys } from "../utils/redisKeys.ts";
 import axios from "axios";
 
 export const registerNGOController = async (req: Request, res: Response): Promise<Response> => {
@@ -35,6 +37,9 @@ export const registerNGOController = async (req: Request, res: Response): Promis
             registrationDocuments: documentUrl,
             verificationStatus: "PENDING" // Explicit initial state
         });
+
+        await safeRedis.set(RedisKeys.ngoDetails(ngo._id.toString()), JSON.stringify(ngo.toObject()), { EX: 86400 });
+        await safeRedis.incr(RedisKeys.pendingNgoCount());
 
         return res.status(201).json({
             status: "success",
@@ -94,14 +99,23 @@ export const getPendingNGOsController = async (req: Request, res: Response): Pro
         // 2. Fetch pending NGOs and total count concurrently
         const query = { verificationStatus: "PENDING" } as const;
 
-        const [pendingNGOs, totalCount] = await Promise.all([
+        const [pendingNGOs, cachedCount] = await Promise.all([
             ngoModel.find(query)
                 .sort({ createdAt: -1 }) // Oldest first or newest first (-1 for newest)
                 .skip(skip)
                 .limit(limit)
                 .lean(),
-            ngoModel.countDocuments(query)
+            safeRedis.get(RedisKeys.pendingNgoCount())
         ]);
+
+        let totalCount: number;
+        if (cachedCount === null || cachedCount === undefined) {
+            totalCount = await ngoModel.countDocuments(query);
+            // Self-healing: Backfill Redis with ground truth
+            await safeRedis.set(RedisKeys.pendingNgoCount(), totalCount.toString());
+        } else {
+            totalCount = parseInt(cachedCount, 10) || 0;
+        }
 
         // 3. Calculate metadata
         const totalPages = Math.ceil(totalCount / limit);
@@ -113,7 +127,7 @@ export const getPendingNGOsController = async (req: Request, res: Response): Pro
                 pagination: {
                     currentPage: page,
                     totalPages,
-                    totalNGOs: totalCount,
+                    totalNGOs: Number(totalCount),
                     limit,
                     hasNextPage: page < totalPages,
                     hasPrevPage: page > 1
@@ -131,6 +145,7 @@ export const getPendingNGOsController = async (req: Request, res: Response): Pro
 };
 
 export const verifyNGOController = async (req: Request, res: Response): Promise<Response> => {
+    //incomplete yet
     try {
         const { ngoId } = req.params;
         const { status } = req.body; // Expects 'APPROVED' or 'REJECTED'
@@ -142,6 +157,25 @@ export const verifyNGOController = async (req: Request, res: Response): Promise<
                 message: "Invalid status. Must be 'APPROVED' or 'REJECTED'."
             });
         }
+        if (!ngoId) return res.status(400).json({
+            status: "failed",
+            message: "No ngoId given."
+        });
+
+        const cachedNgoStr = await safeRedis.get(RedisKeys.ngoDetails(ngoId as string));
+
+        if (cachedNgoStr) {
+            // 2. Parse string into an object
+            const ngoRedis = JSON.parse(cachedNgoStr);
+
+            // 3. Access property on parsed object
+            if (ngoRedis.verificationStatus === status) {
+                return res.status(400).json({
+                    status: "failed",
+                    message: `NGO status is already ${status}`
+                });
+            }
+        }
 
         // 2. Fetch NGO
         const ngo = await ngoModel.findById(ngoId);
@@ -150,10 +184,17 @@ export const verifyNGOController = async (req: Request, res: Response): Promise<
         }
 
         // Prevent redundant updates
+        const previousStatus = ngo.verificationStatus;
         if (ngo.verificationStatus === status) {
             return res.status(400).json({
                 status: "failed",
                 message: `NGO is already ${status}.`
+            });
+        }
+        if (previousStatus !== "PENDING") {
+            return res.status(400).json({
+                status: "failed",
+                message: `Cannot change status. NGO has already been processed as ${previousStatus}.`
             });
         }
 
@@ -196,6 +237,34 @@ export const verifyNGOController = async (req: Request, res: Response): Promise<
 
         await ngo.save(); // Clean DB write!
 
+        const ngoPlain = ngo.toObject();
+
+        // Cache updated details with 24h TTL
+        await safeRedis.set(
+            RedisKeys.ngoDetails(ngo._id.toString()),
+            JSON.stringify(ngoPlain),
+            { EX: 86400 }
+        );
+
+        // ONLY decrement pending count if transitioning from PENDING
+        if (previousStatus === "PENDING") {
+            await safeRedis.decr(RedisKeys.pendingNgoCount());
+        }
+
+        // Handle Geospatial Indexing based on status
+        if (status === 'APPROVED' && ngo.location?.coordinates) {
+            const [longitude, latitude] = ngo.location.coordinates;
+            await safeRedis.geoAdd(
+                RedisKeys.ngoLocations(),
+                longitude,
+                latitude,
+                ngo._id.toString()
+            );
+        } else if (status === 'REJECTED') {
+            // Remove from Geo set if present
+            await safeRedis.zrem(RedisKeys.ngoLocations(), ngo._id.toString());
+        }
+
         return res.status(200).json({
             status: "success",
             message: `NGO status updated to ${status} successfully.`,
@@ -208,6 +277,7 @@ export const verifyNGOController = async (req: Request, res: Response): Promise<
     }
 };
 
+//This controller will not be used.
 export const addCoAdminController = async (req: Request, res: Response): Promise<Response> => {
     try {
         const { ngoId } = req.params;
@@ -288,8 +358,9 @@ export const addMemberController = async (req: Request, res: Response): Promise<
     try {
         const { ngoId } = req.params;
         const { targetUserIdentifier, roleInNGO } = req.body;
+        if (!ngoId) return res.status(400).json({ status: "failed", message: "ngoId is required." });
         if (!targetUserIdentifier || !roleInNGO) {
-            return res.status(200).json({ status: "failed", message: "User and its role is both required." });
+            return res.status(400).json({ status: "failed", message: "User and its role is both required." });
         }
         const allowedRoles = ["NGO_ADMIN", "GROUND_WORKER", "VOLUNTEER"];
         if (!allowedRoles.includes(roleInNGO)) {
@@ -299,26 +370,68 @@ export const addMemberController = async (req: Request, res: Response): Promise<
             });
         }
 
+        const currentUserId = req.user!._id.toString();
+        const isSuperAdmin = req.user!.role === 'SUPER_ADMIN';
 
+        let ngoData: {
+            _id: string;
+            name: string;
+            verificationStatus: string;
+            location: any;
+            adminId: string;
+            ngoAdmins: string[];
+            ngoWorkers: string[];
+        } | null = null;
+        // 2. Cache-First Check: Try loading from Redis
+        const cachedNgoStr = await safeRedis.get(RedisKeys.ngoDetails(ngoId!.toString()));
+        if (cachedNgoStr) {
+            const parsed = JSON.parse(cachedNgoStr);
+            ngoData = {
+                ...parsed,
+                _id: ngoId,
+                ngoAdmins: parsed.ngoAdmins.map((id: any) => id.toString()),
+                ngoWorkers: parsed.ngoWorkers.map((id: any) => id.toString())
+            };
+        }
+
+        if (ngoData) {
+            if (ngoData.verificationStatus !== "APPROVED") {
+                return res.status(400).json({
+                    status: "failed",
+                    message: "Cannot add members to an unverified or rejected NGO."
+                });
+            }
+
+            const isNgoAdmin = ngoData.ngoAdmins.includes(currentUserId);
+            if (!isNgoAdmin && !isSuperAdmin) {
+                return res.status(403).json({
+                    status: "failed",
+                    message: "Forbidden: You are not an admin of this specific NGO."
+                });
+            }
+        }
+
+        //3. DB call
         const ngo = await ngoModel.findById(ngoId);
         if (!ngo) {
             return res.status(404).json({ status: "failed", message: "NGO not found." });
         }
-        if (ngo.verificationStatus != "APPROVED") {
+
+        if (ngo.verificationStatus !== "APPROVED") {
             return res.status(400).json({
                 status: "failed",
                 message: "Cannot add members to an unverified or rejected NGO."
             });
         }
-        const isNgoAdmin = ngo.ngoAdmins.some(id => id.toString() === req.user!._id);
-        const isSuperAdmin = req.user!.role === 'SUPER_ADMIN';
+
+        const isNgoAdmin = ngo.ngoAdmins.some(id => id.toString() === currentUserId);
         if (!isNgoAdmin && !isSuperAdmin) {
             return res.status(403).json({
                 status: "failed",
                 message: "Forbidden: You are not an admin of this specific NGO."
             });
         }
-        
+
         let syncResponse;
         try {
             syncResponse = await axios.patch(
@@ -341,7 +454,7 @@ export const addMemberController = async (req: Request, res: Response): Promise<
             });
         }
 
-        const { targetUserId } = syncResponse.data.data;
+        const { targetUserId } = syncResponse.data.data.toString();
         if (roleInNGO === "NGO_ADMIN") {
             const isAdmin = ngo.ngoAdmins.some(id => id.toString() === targetUserId);
             if (!isAdmin) ngo.ngoAdmins.push(targetUserId);
@@ -351,6 +464,8 @@ export const addMemberController = async (req: Request, res: Response): Promise<
         }
 
         await ngo.save();
+
+        await safeRedis.set(RedisKeys.ngoDetails(ngo._id.toString()), JSON.stringify(ngo.toObject()), { EX: 86400 });
 
         return res.status(200).json({
             status: "success",
@@ -362,4 +477,4 @@ export const addMemberController = async (req: Request, res: Response): Promise<
         console.error("Error in addMemberController:", error);
         return res.status(500).json({ status: "failed", message: "Internal server error adding member." });
     }
-}
+};

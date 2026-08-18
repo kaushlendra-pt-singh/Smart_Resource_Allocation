@@ -21,7 +21,7 @@ export interface IUser extends Document {
   phone: string;
   role: UserRole;
   ngoId: mongoose.Types.ObjectId | null; // Null for SUPER_ADMIN & standalone RESIDENTs
-  verificationStatus: verificationTypes;                   // For NGO workers requiring admin approval
+  verificationStatus: verificationTypes; // For NGO workers requiring admin approval
   isActive: boolean;                     // For account suspension/security
   isGoogleUser: boolean;
   joinedNGOs: IJoinedNGO[];
