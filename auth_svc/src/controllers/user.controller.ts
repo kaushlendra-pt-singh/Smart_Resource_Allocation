@@ -7,6 +7,7 @@ import { sendEmail } from "../utils/sendEmail.ts";
 import { OAuth2Client } from "google-auth-library";
 import { RedisKeys } from "../utils/redisKeys";
 import { safeRedis } from "../config/redis";
+import axios from "axios";
 
 
 const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
@@ -132,12 +133,29 @@ const promoteFounderController = async (req: Request, res: Response): Promise<Re
         // 3. Promote Role & Link NGO
         user.role = "NGO_ADMIN";
 
-        const alreadyJoined = user.joinedNGOs.some(id => id.toString() === ngoId.toString());
+        const alreadyJoined = user.joinedNGOs?.some(
+            (item: any) => item.ngoId.toString() === ngoId.toString()
+        );
         if (!alreadyJoined) {
             user.joinedNGOs.push({ ngoId, roleInNGO: "NGO_ADMIN" });
         }
 
         await user.save({ validateBeforeSave: false });
+
+        // 3. Redis Invalidation & Sync
+        const userCacheKey = RedisKeys.userProfile(userId.toString());
+
+        // Remove stale user cache so next read fetches fresh role data
+        await safeRedis.del(userCacheKey);
+
+        // Optional: Cache updated profile immediately (Write-Through strategy)
+        const updatedUserObj = user.toObject();
+
+        await safeRedis.set(
+            userCacheKey,
+            JSON.stringify(updatedUserObj),
+            { EX: 86400 } // 24 hours TTL
+        );
 
         return res.status(200).json({
             status: "success",
@@ -196,34 +214,80 @@ const addCoWorkerController = async (req: Request, res: Response): Promise<Respo
     try {
 
         const { targetUserIdentifier, ngoId, roleInNGO } = req.body;
+
+        if (!targetUserIdentifier || !ngoId || !roleInNGO) {
+            return res.status(400).json({
+                status: "failed",
+                message: "targetUserIdentifier, ngoId, and roleInNGO are required."
+            });
+        }
+
+        // 1. Fetch User
         const user = await userModel.findById(targetUserIdentifier);
         if (!user) {
             return res.status(404).json({ status: "failed", message: "User not found." });
         }
 
+        // 2. Update or Add NGO Membership Subdocument
         const existingNGOIndex = user.joinedNGOs.findIndex(
             (item) => item.ngoId.toString() === ngoId.toString()
         );
 
         if (existingNGOIndex !== -1) {
-            // Update role if already joined, or reject
             user.joinedNGOs[existingNGOIndex]!.roleInNGO = roleInNGO;
-            user.role = roleInNGO;
         } else {
-            // Add new membership entry
             user.joinedNGOs.push({ ngoId, roleInNGO });
-            user.role = roleInNGO;
+        }
+
+        // 3. Smart Global Role Calculation (Handles Promotions & Demotions)
+        if (user.role !== "SUPER_ADMIN") {
+            const hasAnyAdminRole = user.joinedNGOs.some(
+                (item) => item.roleInNGO === "NGO_ADMIN"
+            );
+
+            if (hasAnyAdminRole) {
+                user.role = "NGO_ADMIN";
+            } else {
+                // If demoted from Admin in this NGO and has no other Admin roles, fallback to roleInNGO
+                user.role = roleInNGO;
+            }
         }
 
         await user.save();
 
+        // 4. Redis Cache Management (Invalidate + Write-Through)
+        const userCacheKey = RedisKeys.userProfile
+            ? RedisKeys.userProfile(user._id.toString())
+            : `user:profile:${user._id.toString()}`;
+
+        // Invalidate stale profile
+        await safeRedis.del(userCacheKey);
+
+        // Optional: Pre-populate updated profile without sensitive data
+        const updatedUserObj = user.toObject();
+
+        await safeRedis.set(
+            userCacheKey,
+            JSON.stringify(updatedUserObj),
+            { EX: 86400 } // 24 Hours TTL
+        );
+
         return res.status(200).json({
             status: "success",
-            data: { targetUserId: user._id.toString() }
+            message: "User NGO membership and roles updated successfully.",
+            data: {
+                targetUserId: user._id.toString(),
+                updatedGlobalRole: user.role,
+                ngoRole: roleInNGO
+            }
         });
+
     } catch (error: any) {
-        console.error("Error in addJoinedNGOInternalController:", error);
-        return res.status(500).json({ status: "failed", message: "Internal server error updating user NGO membership." });
+        console.error("Error in addCoWorkerController:", error);
+        return res.status(500).json({
+            status: "failed",
+            message: "Internal server error updating user NGO membership."
+        });
     }
 };
 
@@ -608,22 +672,51 @@ const deleteUserController = async (req: Request, res: Response): Promise<Respon
             return res.status(400).json({ status: "failed", message: "User Id is needed to delete user." });
         }
 
-        const deletedUser = await userModel.findByIdAndDelete(userId);
-        if (!deletedUser) return res.status(404).json({ message: "User not found." });
+        const userIdStr = userId.toString();
 
-        const userIdStr = userId!.toString();
+        // 1. Interservice Call to ngo_svc to scrub NGO memberships
+        try {
+            await axios.delete(
+                `${process.env.NGO_SERVICE_URL}/internal/users/${userIdStr}/cleanup`,
+                {
+                    headers: { "x-internal-key": process.env.INTERNAL_API_KEY },
+                    timeout: 8000
+                }
+            );
+        } catch (ngoServiceError: any) {
+            // Handle founder restriction or service failure
+            const failureMessage = ngoServiceError.response?.data?.message || "Failed to notify NGO service.";
+            return res.status(400).json({
+                status: "failed",
+                message: `Account deletion aborted: ${failureMessage}`
+            });
+        }
+
+        // 2. Delete user from auth_svc MongoDB
+        const deletedUser = await userModel.findByIdAndDelete(userIdStr);
+        if (!deletedUser) {
+            return res.status(404).json({ status: "failed", message: "User not found." });
+        }
+
+        // 3. Clear Redis sessions & refresh tokens
         await safeRedis.del([
             RedisKeys.userRefreshToken(userIdStr),
             RedisKeys.userProfile(userIdStr)
         ]);
 
+        // 4. Clear auth cookie & respond
         return res
-            .clearCookie("refreshToken", { httpOnly: true, secure: process.env.NODE_ENV === "production", sameSite: "strict" })
+            .clearCookie("refreshToken", {
+                httpOnly: true,
+                secure: process.env.NODE_ENV === "production",
+                sameSite: "strict"
+            })
             .status(200)
-            .json({ message: "User account permanently deleted from the system." });
+            .json({ status: "success", message: "User account permanently deleted from the system." });
+
     } catch (error: any) {
         console.error(`Error while deleting user: ${error}`);
-        return res.status(500).json({ message: error.message });
+        return res.status(500).json({ status: "failed", message: "Internal server error deleting user account." });
     }
 };
 

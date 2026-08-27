@@ -557,3 +557,57 @@ export const getNgoMembersController = async (req: Request, res: Response): Prom
     }
 };
 
+export const cleanupDeletedUserController = async (req: Request, res: Response): Promise<Response> => {
+    try {
+        const { userId } = req.params;
+
+        if (!userId) {
+            return res.status(400).json({ status: "failed", message: "User ID is required." });
+        }
+
+        // 1. Prevent deletion if user is the primary Founder/Creator of an NGO
+        const foundedNgo = await ngoModel.findOne({ adminId: userId });
+        if (foundedNgo) {
+            return res.status(400).json({
+                status: "failed",
+                message: "Cannot delete user: User is the primary founder/admin of an active NGO. Transfer ownership or delete the NGO first."
+            });
+        }
+
+        // 2. Find all NGOs where the user is an admin or worker
+        const affectedNgos = await ngoModel.find({
+            $or: [{ ngoAdmins: userId }, { ngoWorkers: userId }]
+        });
+
+        if (affectedNgos.length === 0) {
+            return res.status(200).json({ status: "success", message: "No NGO memberships found to clean up." });
+        }
+
+        // 3. Remove user ID from ngoAdmins and ngoWorkers arrays
+        await ngoModel.updateMany(
+            { $or: [{ ngoAdmins: userId }, { ngoWorkers: userId }] },
+            {
+                $pull: {
+                    ngoAdmins: userId,
+                    ngoWorkers: userId
+                }
+            }
+        );
+
+        // 4. Invalidate Redis cache for all impacted NGOs
+        const cacheDelPromises = affectedNgos.map(ngo =>
+            safeRedis.del(RedisKeys.ngoDetails(ngo._id.toString()))
+        );
+        await Promise.all(cacheDelPromises);
+
+        return res.status(200).json({
+            status: "success",
+            message: "User successfully scrubbed from all NGO member rosters and Redis caches."
+        });
+
+    } catch (error: any) {
+        console.error("Error in cleanupDeletedUserController:", error);
+        return res.status(500).json({ status: "failed", message: "Failed to cleanup user NGO memberships." });
+    }
+};
+

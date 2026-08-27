@@ -9,11 +9,13 @@ import {
     addMemberController,
     getNgoByIdController,
     listNgosController,
-    getNgoMembersController
+    getNgoMembersController,
+    cleanupDeletedUserController
 } from "../controllers/ngo.controllers.ts";
 
 import { authMiddleWare, requireRoles } from "../middlewares/auth.middleware.ts";
 import { optionalAuth } from "../middlewares/optionalAuth.ts";
+import { verifyInternalKey } from "../middlewares/verufyInternalKey.ts";
 
 const ngoRouter = express.Router();
 
@@ -74,6 +76,14 @@ ngoRouter.get(
     rateLimiter,
     authMiddleWare,
     getNgoMembersController
+);
+
+ngoRouter.delete(
+    "/internal/users/:userId/cleanup",
+    rateLimiter,
+    verifyInternalKey,
+    authMiddleWare,
+    cleanupDeletedUserController
 );
 
 export default ngoRouter;
