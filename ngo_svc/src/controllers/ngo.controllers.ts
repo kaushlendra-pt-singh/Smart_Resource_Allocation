@@ -5,6 +5,7 @@ import { safeRedis } from "../config/redis.ts";
 import { RedisKeys } from "../utils/redisKeys.ts";
 import axios from "axios";
 
+
 export const registerNGOController = async (req: Request, res: Response): Promise<Response> => {
     try {
         // 1. Extract required fields INCLUDING documentUrl from Cloudinary
@@ -277,83 +278,6 @@ export const verifyNGOController = async (req: Request, res: Response): Promise<
     }
 };
 
-//This controller will not be used.
-export const addCoAdminController = async (req: Request, res: Response): Promise<Response> => {
-    try {
-        const { ngoId } = req.params;
-        const { targetUserId } = req.body;
-        const requesterRole = req.user?.role;
-        const requesterNGOs = req.user?.joinedNGOs || [];
-
-        if (!targetUserId) {
-            return res.status(400).json({
-                status: "failed",
-                message: "targetUserId is required."
-            });
-        }
-
-        // 1. Authorization Check: Must be SUPER_ADMIN OR an NGO_ADMIN of THIS specific NGO
-        const isSuperAdmin = requesterRole === 'SUPER_ADMIN';
-        const isNGOAdminOfThisNGO = requesterRole === 'NGO_ADMIN' && requesterNGOs.some((id: any) => id.toString() === String(ngoId));
-
-        if (!isSuperAdmin && !isNGOAdminOfThisNGO) {
-            return res.status(403).json({
-                status: "failed",
-                message: "Access Denied: You are not authorized to add co-admins for this NGO."
-            });
-        }
-
-        // 2. Ensure NGO exists and is APPROVED
-        const ngo = await ngoModel.findById(ngoId);
-        if (!ngo) {
-            return res.status(404).json({ status: "failed", message: "NGO not found." });
-        }
-        if (ngo.verificationStatus !== 'APPROVED') {
-            return res.status(400).json({
-                status: "failed",
-                message: "Cannot add co-admins to an unapproved or rejected NGO."
-            });
-        }
-
-        const isAlreadyCoAdmin = ngo.ngoAdmins.some((id) => id.toString() === targetUserId.toString());
-        if (!isAlreadyCoAdmin) {
-            ngo.ngoAdmins.push(targetUserId);
-            await ngo.save();
-        }
-
-        // 3. Inter-Service Call to auth_svc with strict targetUserId
-        try {
-            await axios.patch(
-                `${process.env.AUTH_SERVICE_URL}/api/auth/internal/promote-coadmin`,
-                {
-                    targetUserId,
-                    ngoId: ngo._id
-                },
-                {
-                    headers: {
-                        "x-internal-key": process.env.INTERNAL_API_KEY
-                    }
-                }
-            );
-        } catch (syncError: any) {
-            console.error("Failed to sync co-admin promotion with auth_svc:", syncError);
-            return res.status(502).json({
-                status: "failed",
-                message: "Failed to promote co-admin in Auth Service."
-            });
-        }
-
-        return res.status(200).json({
-            status: "success",
-            message: `User (${targetUserId}) added as co-admin successfully.`
-        });
-
-    } catch (error: any) {
-        console.error("Error in addCoAdminController:", error);
-        return res.status(500).json({ status: "failed", message: "Internal server error adding co-admin." });
-    }
-};
-
 export const addMemberController = async (req: Request, res: Response): Promise<Response> => {
     try {
         const { ngoId } = req.params;
@@ -468,3 +392,168 @@ export const addMemberController = async (req: Request, res: Response): Promise<
         return res.status(500).json({ status: "failed", message: "Internal server error." });
     }
 };
+
+export const getNgoByIdController = async (req: Request, res: Response): Promise<Response> => {
+    try {
+        const { ngoId } = req.params;
+        const currentUserId = req.user?._id?.toString();
+        const userRole = req.user?.role;
+        const isSuperAdmin = userRole === "SUPER_ADMIN";
+        if (!ngoId)
+            return res.status(400).json({ message: "Ngo Id is required.", status: "failed" });
+
+        // 1. Check Redis Cache First
+        let ngoData;
+        const cachedNgoStr = await safeRedis.get(RedisKeys.ngoDetails(ngoId.toString()));
+
+        if (cachedNgoStr) {
+            ngoData = JSON.parse(cachedNgoStr);
+        } else {
+            // Fallback to MongoDB
+            const ngoDoc = await ngoModel.findById(ngoId);
+            if (!ngoDoc) {
+                return res.status(404).json({ status: "failed", message: "NGO not found." });
+            }
+            ngoData = ngoDoc.toObject();
+
+            // Populate Redis Cache
+            await safeRedis.set(
+                RedisKeys.ngoDetails(ngoId.toString()),
+                JSON.stringify(ngoData),
+                { EX: 86400 }
+            );
+        }
+
+        // 2. Authorization Check for Non-Approved NGOs
+        if (ngoData.verificationStatus !== "APPROVED") {
+            const isNgoAdmin = ngoData.ngoAdmins?.some((id: any) => id.toString() === currentUserId);
+            const isNgoWorker = ngoData.ngoWorkers?.some((id: any) => id.toString() === currentUserId);
+
+            // Deny access if user is neither Super Admin nor an NGO member
+            if (!isSuperAdmin && !isNgoAdmin && !isNgoWorker) {
+                return res.status(403).json({
+                    status: "failed",
+                    message: "Forbidden: You do not have permission to view this unapproved NGO."
+                });
+            }
+        }
+
+        // 3. Return NGO Data
+        return res.status(200).json({
+            status: "success",
+            data: ngoData
+        });
+
+    } catch (error) {
+        console.error("Error in getNgoByIdController:", error);
+        return res.status(500).json({ status: "failed", message: "Internal server error." });
+    }
+};
+
+export const listNgosController = async (req: Request, res: Response): Promise<Response> => {
+    try {
+        const page = Math.max(1, parseInt(req.query.page as string) || 1);
+        const limit = Math.min(50, Math.max(1, parseInt(req.query.limit as string) || 10));
+        const skip = (page - 1) * limit;
+
+        const { search, status } = req.query;
+        const isAdmin = req.user?.role === "SUPER_ADMIN" || req.user?.role === "NGO_ADMIN";
+
+        // Security Guard: Public users are strictly locked to APPROVED
+        const filter: Record<string, any> = {
+            verificationStatus: (isAdmin && status) ? status : "APPROVED"
+        };
+
+        if (search) {
+            filter.$or = [
+                { name: { $regex: search, $options: "i" } },
+                { "location.address": { $regex: search, $options: "i" } }
+            ];
+        }
+
+        const [ngos, totalNgos] = await Promise.all([
+            ngoModel.find(filter)
+                .sort({ createdAt: -1 })
+                .skip(skip)
+                .limit(limit)
+                .lean(),
+            ngoModel.countDocuments(filter)
+        ]);
+
+        return res.status(200).json({
+            status: "success",
+            pagination: {
+                totalNgos,
+                totalPages: Math.ceil(totalNgos / limit),
+                currentPage: page,
+                limit
+            },
+            data: ngos
+        });
+    } catch (error) {
+        console.error("Error listing NGOs:", error);
+        return res.status(500).json({ status: "failed", message: "Internal server error." });
+    }
+};
+
+export const getNgoMembersController = async (req: Request, res: Response): Promise<Response> => {
+    try {
+        // 1. Extract from req.params (RESTful standard)
+        const { ngoId } = req.params;
+        const currentUserId = req.user?._id?.toString();
+        const isSuperAdmin = req.user?.role === "SUPER_ADMIN";
+
+        if (!ngoId) {
+            return res.status(400).json({ status: "failed", message: "NGO ID is required." });
+        }
+
+        let ngoData: any;
+        const cachedItemStr = await safeRedis.get(RedisKeys.ngoDetails(ngoId.toString()));
+
+        if (cachedItemStr) {
+            ngoData = JSON.parse(cachedItemStr);
+        } else {
+            const dbData = await ngoModel.findById(ngoId);
+            if (!dbData) {
+                return res.status(404).json({ status: "failed", message: "NGO not found." });
+            }
+
+            ngoData = dbData.toObject();
+            await safeRedis.set(
+                RedisKeys.ngoDetails(ngoId.toString()),
+                JSON.stringify(ngoData),
+                { EX: 86400 }
+            );
+        }
+
+        // 2. Extract & stringify member IDs
+        const ngoAdmins = (ngoData.ngoAdmins || []).map((id: any) => id.toString());
+        const ngoWorkers = (ngoData.ngoWorkers || []).map((id: any) => id.toString());
+        const allMembers = [...ngoAdmins, ...ngoWorkers];
+
+        // 3. Authorization Guard: Ensure caller is a member of this NGO or a Super Admin
+        const isMember = allMembers.includes(currentUserId || "");
+        if (!isSuperAdmin && !isMember) {
+            return res.status(403).json({
+                status: "failed",
+                message: "Forbidden: Only members or Super Admins can view this roster."
+            });
+        }
+
+        // 4. Return structured response with roles distinguished
+        return res.status(200).json({
+            status: "success",
+            message: "Members fetched successfully.",
+            data: {
+                ngoAdmins,
+                ngoWorkers,
+                totalMembers: allMembers.length
+            }
+        });
+
+    } catch (error) {
+        console.error("Error in getNgoMembersController:", error);
+        return res.status(500).json({ status: "failed", message: "Internal server error fetching members." });
+    }
+};
+

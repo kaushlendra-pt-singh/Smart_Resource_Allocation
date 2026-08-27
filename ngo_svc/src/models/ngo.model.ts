@@ -7,6 +7,7 @@ export interface INGO extends Document {
   adminId: mongoose.Types.ObjectId; // Links back to the NGO_ADMIN who created it
   location: {
     address: string;
+    type: "Point";
     coordinates: [number, number]; // [longitude, latitude] for geospatial filtering
   };
   registrationDocuments: [String];
@@ -28,6 +29,7 @@ const NGOSchema: Schema = new Schema<INGO>(
     },
     location: {
       address: { type: String, required: true },
+      type: { type: String, enum: ['Point'], default: 'Point', required: true },
       coordinates: {
         type: [Number], // Always remember: [longitude, latitude] ordering in GeoJSON
         required: true,
@@ -49,6 +51,8 @@ const NGOSchema: Schema = new Schema<INGO>(
 
 // Enable geo-spatial queries (crucial for local resource allocation tasks later)
 NGOSchema.index({ 'location.coordinates': '2dsphere' });
+//Compound index for filtered paginated lists, latest first
+NGOSchema.index({ verificationStatus: 1, createdAt: -1 });
 
 // 1. Enforce GeoJSON coordinate array parsing
 NGOSchema.pre<INGO>("save", function () {

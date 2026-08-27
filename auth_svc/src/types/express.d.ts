@@ -7,6 +7,7 @@ declare global {
       user?: {
         _id: string;
         role?: string;
+        email: string;
       };
     }
   }

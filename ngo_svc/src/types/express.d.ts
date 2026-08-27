@@ -6,8 +6,8 @@ declare global {
     interface Request {
       user?: {
         _id: string;
-        role?: string;
-        joinedNGOs: string[];
+        role: string;
+        email: string;
       };
     }
   }

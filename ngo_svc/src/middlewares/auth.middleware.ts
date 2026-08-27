@@ -8,16 +8,16 @@ export async function authMiddleWare(req: Request, res: Response, next: NextFunc
 
         // 1. Update the expected JWT payload structure
         const decoded = jwt.verify(token, process.env.JWT_ACCESS_SECRET!) as {
-            _id: string;  // (Use userId if your login controller still signs it as userId)
+            _id: string;
             role: string;
-            joinedNGOs: string[]; // <-- Updated to array
+            email: string;
         };
 
         // 2. Map the array to the req.user object
         req.user = {
             _id: decoded._id, // Aligned with the JWT payload
             role: decoded.role,
-            joinedNGOs: decoded.joinedNGOs || [] // <-- Safely maps the array (with a fallback)
+            email: decoded.email
         };
 
         next();

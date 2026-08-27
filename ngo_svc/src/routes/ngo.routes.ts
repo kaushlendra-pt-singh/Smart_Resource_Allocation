@@ -6,11 +6,14 @@ import {
     getUploadSignatureController,
     verifyNGOController,
     getPendingNGOsController,
-    addCoAdminController,
-    addMemberController
+    addMemberController,
+    getNgoByIdController,
+    listNgosController,
+    getNgoMembersController
 } from "../controllers/ngo.controllers.ts";
 
 import { authMiddleWare, requireRoles } from "../middlewares/auth.middleware.ts";
+import { optionalAuth } from "../middlewares/optionalAuth.ts";
 
 const ngoRouter = express.Router();
 
@@ -46,11 +49,31 @@ ngoRouter.patch(
 );
 
 ngoRouter.post(
-    "/:ngoId/add-worker",
+    "/:ngoId/addMembers",
     rateLimiter,
     authMiddleWare,
     requireRoles(['NGO_ADMIN', 'SUPER_ADMIN']),
     addMemberController
+);
+
+ngoRouter.get("/",
+    rateLimiter,
+    optionalAuth,
+    listNgosController
+);
+
+ngoRouter.get(
+    "/:ngoId",
+    rateLimiter,
+    optionalAuth,
+    getNgoByIdController
+);
+
+ngoRouter.get(
+    "/:ngoId/members",
+    rateLimiter,
+    authMiddleWare,
+    getNgoMembersController
 );
 
 export default ngoRouter;
