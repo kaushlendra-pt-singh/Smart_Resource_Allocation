@@ -5,6 +5,11 @@ import { safeRedis } from "../config/redis.ts";
 import { RedisKeys } from "../utils/redisKeys.ts";
 import axios from "axios";
 
+/*
+deleteNgo
+hevent implemented profile and cover images yet.
+*/
+
 
 export const registerNGOController = async (req: Request, res: Response): Promise<Response> => {
     try {
@@ -611,3 +616,315 @@ export const cleanupDeletedUserController = async (req: Request, res: Response):
     }
 };
 
+
+export const updateNgoProfileController = async (req: Request, res: Response): Promise<Response> => {
+    try {
+        const { ngoId } = req.params;
+        const { name, location } = req.body;
+        const currentUserId = req.user?._id?.toString();
+        const isSuperAdmin = req.user?.role === "SUPER_ADMIN";
+
+        if (!ngoId) {
+            return res.status(400).json({ status: "failed", message: "NGO ID parameter is required." });
+        }
+
+        if (!name && !location) {
+            return res.status(400).json({ status: "failed", message: "No updatable fields provided." });
+        }
+
+        // 1. Fetch Mongoose Document directly from DB to preserve .save() and instance methods
+        const ngoDoc = await ngoModel.findById(ngoId);
+        if (!ngoDoc) {
+            return res.status(404).json({ status: "failed", message: "NGO not found." });
+        }
+
+        // 2. Authorization Check: Must be Super Admin or an NGO Admin of this NGO
+        const isNgoAdmin = ngoDoc.ngoAdmins?.some((id: any) => id.toString() === currentUserId);
+        if (!isSuperAdmin && !isNgoAdmin) {
+            return res.status(403).json({
+                status: "failed",
+                message: "Forbidden: You are not authorized to update this NGO profile."
+            });
+        }
+
+        // 3. Apply Selective Updates
+        if (name) {
+            ngoDoc.name = name.trim();
+        }
+
+        if (location) {
+            // Ensure GeoJSON format compliance
+            if (location.address) ngoDoc.location.address = location.address;
+            if (location.coordinates && Array.isArray(location.coordinates)) {
+                ngoDoc.location.coordinates = location.coordinates; // [longitude, latitude]
+            }
+        }
+
+        // 4. Save to MongoDB (Triggers schema validation automatically)
+        await ngoDoc.save();
+
+        const updatedNgoObj = ngoDoc.toObject();
+
+        // 5. Update / Invalidate Redis Cache
+        const cacheKey = RedisKeys.ngoDetails(ngoId.toString());
+        await safeRedis.set(
+            cacheKey,
+            JSON.stringify(updatedNgoObj),
+            { EX: 86400 } // 24 hours TTL
+        );
+        // Redis GEOADD expects: key, longitude, latitude, member_id
+        await safeRedis.geoAdd("ngo:locations",
+            location.coordinates[0],
+            location.coordinates[1],
+            ngoId.toString()
+        );
+
+        return res.status(200).json({
+            status: "success",
+            message: "NGO profile updated successfully.",
+            data: updatedNgoObj
+        });
+
+    } catch (error: any) {
+        console.error("Error in updateNgoProfileController:", error);
+
+        // Handle MongoDB duplicate key error (e.g., duplicate NGO name)
+        if (error.code === 11000) {
+            return res.status(409).json({
+                status: "failed",
+                message: "An NGO with this name already exists."
+            });
+        }
+
+        return res.status(500).json({
+            status: "failed",
+            message: "Internal server error updating NGO profile."
+        });
+    }
+};
+
+export const transferOwnershipController = async (req: Request, res: Response): Promise<Response> => {
+    try {
+        const { ngoId } = req.params;
+        const { newAdminId } = req.body;
+        const currentUserId = req.user?._id?.toString();
+        const isSuperAdmin = req.user?.role === "SUPER_ADMIN";
+
+        if (!ngoId || !newAdminId) {
+            return res.status(400).json({ status: "failed", message: "ngoId and newAdminId are required." });
+        }
+
+        // 1. Fetch NGO Document
+        const ngoDoc = await ngoModel.findById(ngoId);
+        if (!ngoDoc) {
+            return res.status(404).json({ status: "failed", message: "NGO not found." });
+        }
+
+        // 2. Security Check: Only current Founder (adminId) or Super Admin can transfer ownership
+        const isCurrentFounder = ngoDoc.adminId.toString() === currentUserId;
+        if (!isCurrentFounder && !isSuperAdmin) {
+            return res.status(403).json({
+                status: "failed",
+                message: "Forbidden: Only the primary founder or a Super Admin can transfer NGO ownership."
+            });
+        }
+
+        const oldAdminId = ngoDoc.adminId.toString();
+
+        // 3. Update primary founder in MongoDB
+        ngoDoc.adminId = newAdminId;
+
+        // Ensure the new admin is also present in the ngoAdmins array
+        const isAlreadyInAdmins = ngoDoc.ngoAdmins.some(id => id.toString() === newAdminId);
+        if (!isAlreadyInAdmins) {
+            ngoDoc.ngoAdmins.push(newAdminId);
+        }
+
+        // 4. Interservice Call to auth_svc to promote new owner & adjust old owner's global role
+        try {
+            await axios.post(
+                `${process.env.AUTH_SERVICE_URL}/internal/users/promote-founder`,
+                { userId: newAdminId, ngoId },
+                { headers: { "x-interservice-token": process.env.INTERSERVICE_SECRET } }
+            );
+        } catch (authError: any) {
+            console.error("Interservice error sync with auth_svc:", authError.response?.data || authError.message);
+            return res.status(502).json({
+                status: "failed",
+                message: "Failed to synchronize member removal with authentication service. Operation aborted."
+            });
+        }
+
+        await ngoDoc.save();
+
+        // 5. Update Redis Cache
+        const updatedNgoObj = ngoDoc.toObject();
+        await safeRedis.set(
+            RedisKeys.ngoDetails(ngoId.toString()),
+            JSON.stringify(updatedNgoObj),
+            { EX: 86400 }
+        );
+
+        return res.status(200).json({
+            status: "success",
+            message: "NGO primary ownership transferred successfully.",
+            data: {
+                previousAdminId: oldAdminId,
+                newAdminId: newAdminId
+            }
+        });
+
+    } catch (error: any) {
+        console.error("Error in transferOwnershipController:", error);
+        return res.status(500).json({ status: "failed", message: "Internal server error transferring ownership." });
+    }
+};
+
+export const removeMemberController = async (req: Request, res: Response): Promise<Response> => {
+    try {
+        const { ngoId, memberId } = req.params; // Restful: DELETE /:ngoId/members/:memberId
+        const currentUserId = req.user?._id?.toString();
+        const isSuperAdmin = req.user?.role === "SUPER_ADMIN";
+
+        if (!ngoId || !memberId) {
+            return res.status(400).json({ status: "failed", message: "Both ngoId and memberId are required." });
+        }
+
+        // 1. Fetch NGO Document from DB
+        const ngoData = await ngoModel.findById(ngoId);
+        if (!ngoData) {
+            return res.status(404).json({ status: "failed", message: "NGO not found." });
+        }
+
+        // 2. Security Check: Must be Super Admin or NGO Admin of this NGO
+        const isNgoAdmin = ngoData.ngoAdmins?.some((id: any) => id.toString() === currentUserId);
+        if (!isSuperAdmin && !isNgoAdmin) {
+            return res.status(403).json({
+                status: "failed",
+                message: "Forbidden: Only NGO admins or Super Admins can remove members."
+            });
+        }
+
+        // 3. Founder Protection: Cannot remove primary founder via member cleanup
+        if (ngoData.adminId.toString() === memberId.toString()) {
+            return res.status(400).json({
+                status: "failed",
+                message: "Cannot remove primary founder. Transfer ownership first before removing this user."
+            });
+        }
+
+        // 4. Interservice Call to auth_svc (Fail-Fast Approach)
+        try {
+            await axios.post(
+                `${process.env.AUTH_SERVICE_URL}/internal/users/remove-ngo-from-userList`,
+                { userId: memberId, ngoId },
+                { headers: { "x-interservice-token": process.env.INTERSERVICE_SECRET } }
+            );
+        } catch (authError: any) {
+            console.error("Interservice error sync with auth_svc:", authError.response?.data || authError.message);
+            return res.status(502).json({
+                status: "failed",
+                message: "Failed to synchronize member removal with authentication service. Operation aborted."
+            });
+        }
+
+        // 5. In-Memory Filter
+        ngoData.ngoAdmins = ngoData.ngoAdmins.filter(
+            (id) => id.toString() !== memberId.toString()
+        );
+        ngoData.ngoWorkers = ngoData.ngoWorkers.filter(
+            (id) => id.toString() !== memberId.toString()
+        );
+
+        // 6. Save to MongoDB
+        await ngoData.save();
+
+        // 7. Update Redis Cache (Write-Through)
+        const updatedNgoObj = ngoData.toObject();
+        await safeRedis.set(
+            RedisKeys.ngoDetails(ngoId.toString()),
+            JSON.stringify(updatedNgoObj),
+            { EX: 86400 }
+        );
+
+        return res.status(200).json({
+            status: "success",
+            message: "Member successfully removed from NGO.",
+            data: { removedMemberId: memberId }
+        });
+
+    } catch (error) {
+        console.error("Error in removeMemberController:", error);
+        return res.status(500).json({ status: "failed", message: "Internal server error removing member." });
+    }
+};
+
+export const deleteNgoController = async (req: Request, res: Response): Promise<Response> => {
+    try {
+        const { ngoId } = req.params;
+        const currentUserId = req.user?._id?.toString();
+        const isSuperAdmin = req.user?.role === "SUPER_ADMIN";
+
+        if (!ngoId) {
+            return res.status(400).json({ status: "failed", message: "NGO ID parameter is required." });
+        }
+
+        // 1. Fetch NGO Document
+        const ngoDoc = await ngoModel.findById(ngoId);
+        if (!ngoDoc) {
+            return res.status(404).json({ status: "failed", message: "NGO not found." });
+        }
+
+        // 2. Authorization Check: Only primary founder (adminId) or Super Admin can delete the NGO
+        const isPrimaryFounder = ngoDoc.adminId.toString() === currentUserId;
+        if (!isPrimaryFounder && !isSuperAdmin) {
+            return res.status(403).json({
+                status: "failed",
+                message: "Forbidden: Only the primary founder or a Super Admin can delete this NGO."
+            });
+        }
+
+        // Gather all member IDs (admins + workers) to send to auth_svc
+        const allMemberIds = Array.from(
+            new Set([
+                ngoDoc.adminId.toString(),
+                ...(ngoDoc.ngoAdmins || []).map((id: any) => id.toString()),
+                ...(ngoDoc.ngoWorkers || []).map((id: any) => id.toString())
+            ])
+        );
+
+        // 3. Interservice Sync with auth_svc (Fail-Fast approach)
+        try {
+            await axios.post(
+                `${process.env.AUTH_SERVICE_URL}/internal/ngos/cleanup-deleted-ngo`,
+                { ngoId, memberIds: allMemberIds },
+                { headers: { "x-interservice-token": process.env.INTERSERVICE_SECRET } }
+            );
+        } catch (authError: any) {
+            console.error(
+                "Interservice error syncing NGO deletion with auth_svc:",
+                authError.response?.data || authError.message
+            );
+            return res.status(502).json({
+                status: "failed",
+                message: "Failed to synchronize NGO deletion with Auth Service. Deletion aborted."
+            });
+        }
+
+        // 4. Delete document from MongoDB
+        await ngoModel.findByIdAndDelete(ngoId);
+
+        // 5. Purge Redis Cache
+        const cacheKey = RedisKeys.ngoDetails(ngoId.toString());
+        await safeRedis.del(cacheKey);
+
+        return res.status(200).json({
+            status: "success",
+            message: "NGO permanently deleted and all associated member roles synchronized."
+        });
+
+    } catch (error: any) {
+        console.error("Error in deleteNgoController:", error);
+        return res.status(500).json({ status: "failed", message: "Internal server error deleting NGO." });
+    }
+};

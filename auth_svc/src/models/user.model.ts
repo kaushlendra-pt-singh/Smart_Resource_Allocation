@@ -3,12 +3,12 @@ import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
 
 // Define the available roles in the system
-export type UserRole = 'SUPER_ADMIN' | 'NGO_ADMIN' | 'GROUND_WORKER' | 'RESIDENT';
+export type UserRole = 'SUPER_ADMIN' | 'NGO_ADMIN' | 'GROUND_WORKER' | 'RESIDENT' | 'VOLUNTEER';
 export type verificationTypes = 'NONE' | 'PENDING' | 'APPROVED' | 'REJECTED';
 
 export interface IJoinedNGO {
-    ngoId: mongoose.Types.ObjectId;
-    roleInNGO: 'NGO_ADMIN' | 'GROUND_WORKER' | 'VOLUNTEER';
+  ngoId: mongoose.Types.ObjectId;
+  roleInNGO: 'NGO_ADMIN' | 'GROUND_WORKER' | 'VOLUNTEER';
 }
 
 // TS Interface representing the User Document
@@ -47,15 +47,15 @@ const UserSchema: Schema = new Schema<IUser>(
       default: 'RESIDENT'
     },
     joinedNGOs: [
-        {
-            _id: false, // Prevents Mongoose from generating an extra sub-id for every entry
-            ngoId: { type: Schema.Types.ObjectId, ref: 'NGO', required: true },
-            roleInNGO: { 
-                type: String, 
-                enum: ['NGO_ADMIN', 'GROUND_WORKER', 'VOLUNTEER'], 
-                required: true
-            }
+      {
+        _id: false, // Prevents Mongoose from generating an extra sub-id for every entry
+        ngoId: { type: Schema.Types.ObjectId, ref: 'NGO', required: true },
+        roleInNGO: {
+          type: String,
+          enum: ['NGO_ADMIN', 'GROUND_WORKER', 'VOLUNTEER'],
+          required: true
         }
+      }
     ],
     verificationStatus: {
       type: String,
@@ -90,26 +90,26 @@ UserSchema.methods.comparePassword = async function (password: string) {
 }
 
 UserSchema.methods.generateAccessToken = function (this: IUser): string {
-    return jwt.sign(
-        {
-            _id: this._id.toString(),
-            email: this.email,
-            role: this.role
-        },
-        process.env.JWT_ACCESS_SECRET!,
-        { expiresIn: "45m" }
-    );
+  return jwt.sign(
+    {
+      _id: this._id.toString(),
+      email: this.email,
+      role: this.role
+    },
+    process.env.JWT_ACCESS_SECRET!,
+    { expiresIn: "45m" }
+  );
 };
 
 // 2. Concrete Refresh Token Method
 UserSchema.methods.generateRefreshToken = function (this: IUser): string {
-    return jwt.sign(
-        {
-            userId: this._id.toString()
-        },
-        process.env.JWT_REFRESH_SECRET!,
-        { expiresIn: "7d" }
-    );
+  return jwt.sign(
+    {
+      userId: this._id.toString()
+    },
+    process.env.JWT_REFRESH_SECRET!,
+    { expiresIn: "7d" }
+  );
 };
 
 export const userModel = mongoose.model<IUser>('User', UserSchema);

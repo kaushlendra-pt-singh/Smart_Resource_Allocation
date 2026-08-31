@@ -10,7 +10,11 @@ import {
     getNgoByIdController,
     listNgosController,
     getNgoMembersController,
-    cleanupDeletedUserController
+    cleanupDeletedUserController,
+    updateNgoProfileController,
+    transferOwnershipController,
+    removeMemberController,
+    deleteNgoController
 } from "../controllers/ngo.controllers.ts";
 
 import { authMiddleWare, requireRoles } from "../middlewares/auth.middleware.ts";
@@ -82,8 +86,37 @@ ngoRouter.delete(
     "/internal/users/:userId/cleanup",
     rateLimiter,
     verifyInternalKey,
-    authMiddleWare,
     cleanupDeletedUserController
+);
+
+ngoRouter.patch(
+    "/:ngoId",
+    rateLimiter,
+    authMiddleWare,
+    requireRoles(["SUPER_ADMIN", "NGO_ADMIN"]),
+    updateNgoProfileController
+);
+
+ngoRouter.patch(
+    "/:ngoId/transfer-ownership",
+    rateLimiter,
+    authMiddleWare,
+    requireRoles(["SUPER_ADMIN", "NGO_ADMIN"]),
+    transferOwnershipController
+);
+
+ngoRouter.delete("/:ngoId/members/:memberId",
+    rateLimiter,
+    authMiddleWare,
+    requireRoles(["SUPER_ADMIN", "NGO_ADMIN"]),
+    removeMemberController
+);
+
+ngoRouter.delete(
+    "/:ngoId",
+    rateLimiter,
+    authMiddleWare,
+    deleteNgoController
 );
 
 export default ngoRouter;

@@ -18,6 +18,7 @@ const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 //i mplement email smtp api on production instead of sandbox
 //The route and working of googleAuthController is not tested yet.
 //and also not utilized the isgoogleuser field properly.
+//havent implemented profile images yet.
 
 const userRegistrationController = async (req: Request, res: Response): Promise<Response> => {
     try {
@@ -823,6 +824,171 @@ const googleAuthController = async (req: Request, res: Response): Promise<Respon
 
 };
 
+const transferFounderRoleInternalController = async (req: Request, res: Response): Promise<Response> => {
+    try {
+        const { previousAdminId, newAdminId, ngoId } = req.body;
+
+        if (!previousAdminId || !newAdminId || !ngoId) {
+            return res.status(400).json({
+                status: "failed",
+                message: "previousAdminId, newAdminId, and ngoId are required."
+            });
+        }
+
+        // 1. Promote New Admin
+        const newAdmin = await userModel.findById(newAdminId);
+        if (!newAdmin) {
+            return res.status(404).json({ status: "failed", message: "New admin user account not found." });
+        }
+
+        if (newAdmin.role !== "SUPER_ADMIN") {
+            newAdmin.role = "NGO_ADMIN";
+        }
+
+        const newAdminNgoIndex = newAdmin.joinedNGOs.findIndex(
+            (item) => item.ngoId.toString() === ngoId.toString()
+        );
+
+        if (newAdminNgoIndex !== -1) {
+            newAdmin.joinedNGOs[newAdminNgoIndex]!.roleInNGO = "NGO_ADMIN";
+        } else {
+            newAdmin.joinedNGOs.push({ ngoId, roleInNGO: "NGO_ADMIN" });
+        }
+
+        await newAdmin.save();
+
+        // 2. Recalculate Previous Admin's Global Role
+        const previousAdmin = await userModel.findById(previousAdminId);
+        if (previousAdmin) {
+            // Check if they manage any other NGOs as an admin
+            const hasOtherAdminRoles = previousAdmin.joinedNGOs.some(
+                (item) => item.ngoId.toString() !== ngoId.toString() && item.roleInNGO === "NGO_ADMIN"
+            );
+
+            // If not a Super Admin and manages no other NGOs, demote global role
+            if (previousAdmin.role !== "SUPER_ADMIN" && !hasOtherAdminRoles) {
+                // Find remaining role in this NGO or fallback to GROUND_WORKER
+                const currentNgoMembership = previousAdmin.joinedNGOs.find(
+                    (item) => item.ngoId.toString() === ngoId.toString()
+                );
+                previousAdmin.role = currentNgoMembership?.roleInNGO || "GROUND_WORKER";
+            }
+
+            await previousAdmin.save();
+
+            // Clear previous admin cache
+            await safeRedis.del(RedisKeys.userProfile(previousAdminId.toString()));
+        }
+
+        // 3. Invalidate Redis Cache for New Admin
+        await safeRedis.del(RedisKeys.userProfile(newAdminId.toString()));
+
+        return res.status(200).json({
+            status: "success",
+            message: "Founder role successfully transferred in auth_svc."
+        });
+
+    } catch (error: any) {
+        console.error("Error in transferFounderRoleInternalController:", error);
+        return res.status(500).json({
+            status: "failed",
+            message: "Internal server error syncing ownership transfer."
+        });
+    }
+};
+
+const removeNgoFromUserListInternalController = async (req: Request, res: Response): Promise<Response> => {
+    try {
+        const { userId, ngoId } = req.body;
+        const user = await userModel.findById(userId);
+
+        if (!user) {
+            return res.status(404).json({ status: "failed", message: "User not found." });
+        }
+
+        // 1. Remove NGO subdocument from joinedNGOs array
+        user.joinedNGOs = user.joinedNGOs.filter(
+            (item) => item.ngoId.toString() !== ngoId.toString()
+        );
+
+        // 2. Recalculate global role (Demote if no admin roles remain)
+        if (user.role !== "SUPER_ADMIN") {
+            const isStillAdminElsewhere = user.joinedNGOs.some(
+                (item) => item.roleInNGO === "NGO_ADMIN"
+            );
+
+            if (!isStillAdminElsewhere) {
+                // Set to GROUND_WORKER or USER depending on remaining memberships
+                user.role = user.joinedNGOs.length > 0 ? "GROUND_WORKER" : "RESIDENT";
+            }
+        }
+
+        await user.save();
+
+        // 3. Purge user profile in Redis
+        await safeRedis.del(RedisKeys.userProfile(userId.toString()));
+
+        return res.status(200).json({ status: "success", message: "User NGO roster updated successfully." });
+    } catch (error) {
+        console.error("Error in removeNgoFromUserListInternalController:", error);
+        return res.status(500).json({ status: "failed", message: "Internal error updating user rosters." });
+    }
+};
+
+const cleanupDeletedNgoInternalController = async (req: Request, res: Response): Promise<Response> => {
+    try {
+        const { ngoId, memberIds } = req.body;
+
+        if (!ngoId || !Array.isArray(memberIds)) {
+            return res.status(400).json({
+                status: "failed",
+                message: "ngoId and memberIds array are required."
+            });
+        }
+
+        // Fetch all impacted users
+        const users = await userModel.find({ _id: { $in: memberIds } });
+
+        const savePromises = users.map(async (user) => {
+            // 1. Filter out the deleted NGO from joinedNGOs array
+            user.joinedNGOs = user.joinedNGOs.filter(
+                (item) => item.ngoId.toString() !== ngoId.toString()
+            );
+
+            // 2. Recalculate global system role (preserve SUPER_ADMIN status)
+            if (user.role !== "SUPER_ADMIN") {
+                const isStillAdminElsewhere = user.joinedNGOs.some(
+                    (item) => item.roleInNGO === "NGO_ADMIN"
+                );
+
+                if (isStillAdminElsewhere) {
+                    user.role = "NGO_ADMIN";
+                } else if (user.joinedNGOs.length > 0) {
+                    user.role = "GROUND_WORKER";
+                } else {
+                    user.role = "RESIDENT";
+                }
+            }
+
+            await user.save();
+
+            // 3. Purge individual user profile cache from Redis
+            await safeRedis.del(RedisKeys.userProfile(user._id.toString()));
+        });
+
+        await Promise.all(savePromises);
+
+        return res.status(200).json({
+            status: "success",
+            message: "All member profiles updated after NGO deletion."
+        });
+
+    } catch (error: any) {
+        console.error("Error in cleanupDeletedNgoInternalController:", error);
+        return res.status(500).json({ status: "failed", message: "Internal server error cleaning up deleted NGO members." });
+    }
+};
+
 export {
     userRegistrationController,
     promoteFounderController,
@@ -835,5 +1001,8 @@ export {
     forgotPasswordController,
     resetPasswordController,
     deleteUserController,
-    googleAuthController
+    googleAuthController,
+    transferFounderRoleInternalController,
+    removeNgoFromUserListInternalController,
+    cleanupDeletedNgoInternalController
 };
