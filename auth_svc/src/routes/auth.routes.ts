@@ -21,34 +21,45 @@ import { verifyInternalKey } from "../middlewares/verifyinternalKey.ts";
 
 const authRouter = express.Router();
 
-
-authRouter.post("/register", rateLimiter, userRegistrationController);
+// ==========================================
+// 1. Internal Interservice Routes (No Rate Limiter)
+// ==========================================
 authRouter.patch("/internal/promote-founder", verifyInternalKey, promoteFounderController);
 authRouter.patch("/internal/add-joined-ngo", verifyInternalKey, addCoWorkerController);
+
 authRouter.post(
-    "/users/transfer-founder",
-    rateLimiter,
+    "/internal/users/transfer-founder",
     verifyInternalKey,
     transferFounderRoleInternalController
 );
-authRouter.post("/internal/users/remove-ngo-from-userList",
-    rateLimiter,
+
+authRouter.post(
+    "/internal/users/remove-ngo-from-userList",
     verifyInternalKey,
     removeNgoFromUserListInternalController
 );
+
 authRouter.post(
-    "/ngos/cleanup-deleted-ngo",
-    rateLimiter,
+    "/internal/ngos/cleanup-deleted-ngo",
     verifyInternalKey,
     cleanupDeletedNgoInternalController
 );
-authRouter.post("/google-auth", rateLimiter, googleAuthController);
+
+// ==========================================
+// 2. Public Authentication & Account Routes
+// ==========================================
+authRouter.post("/register", rateLimiter, userRegistrationController);
 authRouter.post("/login", rateLimiter, userLoginController);
+authRouter.post("/google-auth", rateLimiter, googleAuthController);
 authRouter.post("/refresh-token", rateLimiter, userRefreshTokenController);
 authRouter.post("/logout", rateLimiter, userLogoutController);
-authRouter.get("/me", rateLimiter, authMiddleware, getUserProfileController);
 authRouter.post("/forgot-password", rateLimiter, forgotPasswordController);
-authRouter.delete("/delete", rateLimiter, authMiddleware, deleteUserController);
 authRouter.patch("/reset-password/:token", rateLimiter, resetPasswordController);
+
+// ==========================================
+// 3. User Session Routes
+// ==========================================
+authRouter.get("/me", rateLimiter, authMiddleware, getUserProfileController);
+authRouter.delete("/delete", rateLimiter, authMiddleware, deleteUserController);
 
 export default authRouter;

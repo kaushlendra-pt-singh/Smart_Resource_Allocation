@@ -6,8 +6,36 @@ import { RedisKeys } from "../utils/redisKeys.ts";
 import axios from "axios";
 
 /*
-deleteNgo
 hevent implemented profile and cover images yet.
+in future change your schema as below
+{
+  "name": "Hope Foundation India",
+  "registrationNumber": "NGO-2026-UP-88492",
+  "description": "Dedicated to youth education, community empowerment, and healthcare access across Uttar Pradesh.",
+  "category": "Education & Healthcare",
+  "contactEmail": "contact@hopefoundation.org",
+  "contactPhone": "+919876543210",
+  "website": "https://hopefoundation.org",
+  "location": {
+    "type": "Point",
+    "address": "Sector 14, Vasundhara, Ghaziabad, Uttar Pradesh, 201012",
+    "coordinates": [77.3820, 28.6631]
+  },
+  "documents": [
+    {
+      "title": "Registration Certificate",
+      "fileUrl": "https://res.cloudinary.com/ngo-cloud/raw/upload/v1/certificates/reg_cert.pdf"
+    },
+    {
+      "title": "80G Tax Exemption Certificate",
+      "fileUrl": "https://res.cloudinary.com/ngo-cloud/raw/upload/v1/certificates/80g_doc.pdf"
+    }
+  ],
+  "socialLinks": {
+    "linkedin": "https://linkedin.com/company/hope-foundation",
+    "twitter": "https://x.com/hope_foundation"
+  }
+}
 */
 
 
@@ -355,7 +383,7 @@ export const addMemberController = async (req: Request, res: Response): Promise<
         try {
             await axios.patch(
                 `${process.env.AUTH_SERVICE_URL}/api/auth/internal/add-joined-ngo`,
-                { targetUserId: targetUserIdStr, ngoId: ngo._id, roleInNGO },
+                { targetUserIdentifier: targetUserIdStr, ngoId: ngo._id, roleInNGO },
                 {
                     headers: { "x-internal-key": process.env.INTERNAL_API_KEY },
                     timeout: 8000
@@ -743,9 +771,9 @@ export const transferOwnershipController = async (req: Request, res: Response): 
         // 4. Interservice Call to auth_svc to promote new owner & adjust old owner's global role
         try {
             await axios.post(
-                `${process.env.AUTH_SERVICE_URL}/internal/users/promote-founder`,
+                `${process.env.AUTH_SERVICE_URL}/api/auth/internal/users/promote-founder`,
                 { userId: newAdminId, ngoId },
-                { headers: { "x-interservice-token": process.env.INTERSERVICE_SECRET } }
+                { headers: { "x-internal-key": process.env.INTERNAL_API_KEY } }
             );
         } catch (authError: any) {
             console.error("Interservice error sync with auth_svc:", authError.response?.data || authError.message);
@@ -816,9 +844,9 @@ export const removeMemberController = async (req: Request, res: Response): Promi
         // 4. Interservice Call to auth_svc (Fail-Fast Approach)
         try {
             await axios.post(
-                `${process.env.AUTH_SERVICE_URL}/internal/users/remove-ngo-from-userList`,
+                `${process.env.AUTH_SERVICE_URL}/api/auth/internal/users/remove-ngo-from-userList`,
                 { userId: memberId, ngoId },
-                { headers: { "x-interservice-token": process.env.INTERSERVICE_SECRET } }
+                { headers: { "x-internal-key": process.env.INTERNAL_API_KEY } }
             );
         } catch (authError: any) {
             console.error("Interservice error sync with auth_svc:", authError.response?.data || authError.message);
@@ -896,9 +924,9 @@ export const deleteNgoController = async (req: Request, res: Response): Promise<
         // 3. Interservice Sync with auth_svc (Fail-Fast approach)
         try {
             await axios.post(
-                `${process.env.AUTH_SERVICE_URL}/internal/ngos/cleanup-deleted-ngo`,
+                `${process.env.AUTH_SERVICE_URL}/api/auth/internal/ngos/cleanup-deleted-ngo`,
                 { ngoId, memberIds: allMemberIds },
-                { headers: { "x-interservice-token": process.env.INTERSERVICE_SECRET } }
+                { headers: { "x-internal-key": process.env.INTERNAL_API_KEY } }
             );
         } catch (authError: any) {
             console.error(

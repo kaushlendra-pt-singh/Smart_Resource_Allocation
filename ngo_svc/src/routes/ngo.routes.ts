@@ -23,7 +23,18 @@ import { verifyInternalKey } from "../middlewares/verufyInternalKey.ts";
 
 const ngoRouter = express.Router();
 
-//these routes are not tested yet
+// ==========================================
+// 1. Internal Interservice Routes (No Rate Limiter)
+// ==========================================
+ngoRouter.delete(
+    "/internal/users/:userId/cleanup",
+    verifyInternalKey,
+    cleanupDeletedUserController
+);
+
+// ==========================================
+// 2. Static Specific Routes (Public / Protected)
+// ==========================================
 ngoRouter.post(
     "/register",
     rateLimiter,
@@ -46,28 +57,16 @@ ngoRouter.get(
     getPendingNGOsController
 );
 
-ngoRouter.patch(
-    "/:ngoId/verify",
-    rateLimiter,
-    authMiddleWare,
-    requireRoles(['SUPER_ADMIN']),
-    verifyNGOController
-);
-
-ngoRouter.post(
-    "/:ngoId/addMembers",
-    rateLimiter,
-    authMiddleWare,
-    requireRoles(['NGO_ADMIN', 'SUPER_ADMIN']),
-    addMemberController
-);
-
-ngoRouter.get("/",
+ngoRouter.get(
+    "/",
     rateLimiter,
     optionalAuth,
     listNgosController
 );
 
+// ==========================================
+// 3. Parameterized NGO Specific Routes (/:ngoId)
+// ==========================================
 ngoRouter.get(
     "/:ngoId",
     rateLimiter,
@@ -82,11 +81,20 @@ ngoRouter.get(
     getNgoMembersController
 );
 
-ngoRouter.delete(
-    "/internal/users/:userId/cleanup",
+ngoRouter.post(
+    "/:ngoId/members",
     rateLimiter,
-    verifyInternalKey,
-    cleanupDeletedUserController
+    authMiddleWare,
+    requireRoles(['NGO_ADMIN', 'SUPER_ADMIN']),
+    addMemberController
+);
+
+ngoRouter.delete(
+    "/:ngoId/members/:memberId",
+    rateLimiter,
+    authMiddleWare,
+    requireRoles(["SUPER_ADMIN", "NGO_ADMIN"]),
+    removeMemberController
 );
 
 ngoRouter.patch(
@@ -98,18 +106,19 @@ ngoRouter.patch(
 );
 
 ngoRouter.patch(
+    "/:ngoId/verify",
+    rateLimiter,
+    authMiddleWare,
+    requireRoles(['SUPER_ADMIN']),
+    verifyNGOController
+);
+
+ngoRouter.patch(
     "/:ngoId/transfer-ownership",
     rateLimiter,
     authMiddleWare,
     requireRoles(["SUPER_ADMIN", "NGO_ADMIN"]),
     transferOwnershipController
-);
-
-ngoRouter.delete("/:ngoId/members/:memberId",
-    rateLimiter,
-    authMiddleWare,
-    requireRoles(["SUPER_ADMIN", "NGO_ADMIN"]),
-    removeMemberController
 );
 
 ngoRouter.delete(
