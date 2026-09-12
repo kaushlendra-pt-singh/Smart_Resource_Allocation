@@ -5,50 +5,24 @@ import { safeRedis } from "../config/redis.ts";
 import { RedisKeys } from "../utils/redisKeys.ts";
 import axios from "axios";
 
-/*
-hevent implemented profile and cover images yet.
-in future change your schema as below
-{
-  "name": "Hope Foundation India",
-  "registrationNumber": "NGO-2026-UP-88492",
-  "description": "Dedicated to youth education, community empowerment, and healthcare access across Uttar Pradesh.",
-  "category": "Education & Healthcare",
-  "contactEmail": "contact@hopefoundation.org",
-  "contactPhone": "+919876543210",
-  "website": "https://hopefoundation.org",
-  "location": {
-    "type": "Point",
-    "address": "Sector 14, Vasundhara, Ghaziabad, Uttar Pradesh, 201012",
-    "coordinates": [77.3820, 28.6631]
-  },
-  "documents": [
-    {
-      "title": "Registration Certificate",
-      "fileUrl": "https://res.cloudinary.com/ngo-cloud/raw/upload/v1/certificates/reg_cert.pdf"
-    },
-    {
-      "title": "80G Tax Exemption Certificate",
-      "fileUrl": "https://res.cloudinary.com/ngo-cloud/raw/upload/v1/certificates/80g_doc.pdf"
-    }
-  ],
-  "socialLinks": {
-    "linkedin": "https://linkedin.com/company/hope-foundation",
-    "twitter": "https://x.com/hope_foundation"
-  }
-}
-*/
-
 
 export const registerNGOController = async (req: Request, res: Response): Promise<Response> => {
     try {
         // 1. Extract required fields INCLUDING documentUrl from Cloudinary
-        const { name, registrationNumber, location, documentUrl } = req.body;
+        const { name, registrationNumber, location, regDoc, license, documents, description, category, website, socialLinks } = req.body;
         const adminId = req.user?._id;
 
-        if (!name || !registrationNumber || !location || !documentUrl) {
+        if (!name || !registrationNumber || !location || !license || !regDoc) {
             return res.status(400).json({
                 status: "failed",
                 message: "Please provide all required fields including documentUrl."
+            });
+        }
+
+        if (!location.address || !Array.isArray(location.coordinates) || location.coordinates.length !== 2) {
+            return res.status(400).json({
+                status: "failed",
+                message: "Invalid location format. Must include address and coordinates [longitude, latitude]."
             });
         }
 
@@ -61,15 +35,27 @@ export const registerNGOController = async (req: Request, res: Response): Promis
             });
         }
 
+        const formattedLocation = {
+            type: "Point" as const,
+            address: location.address,
+            coordinates: location.coordinates // [lng, lat]
+        };
+
         // 3. Save NGO with PENDING status and document link
         const ngo = await ngoModel.create({
-            name,
-            registrationNumber,
+            name: name.trim(),
+            registrationNumber: registrationNumber.trim(),
             adminId,
-            location,
+            location: formattedLocation,
+            regDoc,
+            license,
             ngoAdmins: [adminId!],
-            registrationDocuments: documentUrl,
-            verificationStatus: "PENDING" // Explicit initial state
+            documents: documents || [],
+            description: description || "",
+            category: category || "",
+            socialLinks: socialLinks || {},
+            website: website || "",
+            verificationStatus: "PENDING"
         });
 
         await safeRedis.set(RedisKeys.ngoDetails(ngo._id.toString()), JSON.stringify(ngo.toObject()), { EX: 86400 });
@@ -96,6 +82,7 @@ cloudinary.config({
     api_key: process.env.CLOUDINARY_API_KEY,
     api_secret: process.env.CLOUDINARY_API_SECRET,
 });
+
 
 export const getUploadSignatureController = async (req: Request, res: Response): Promise<Response> => {
     try {
@@ -643,7 +630,6 @@ export const cleanupDeletedUserController = async (req: Request, res: Response):
         return res.status(500).json({ status: "failed", message: "Failed to cleanup user NGO memberships." });
     }
 };
-
 
 export const updateNgoProfileController = async (req: Request, res: Response): Promise<Response> => {
     try {

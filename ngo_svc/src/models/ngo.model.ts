@@ -1,16 +1,35 @@
 import mongoose, { Schema, Document } from 'mongoose';
 
+const DEFAULT_PROFILE_PIC = "https://cdn-icons-png.flaticon.com/512/149/149071.png";
+const DEFAULT_COVER_IMAGE = "https://images.unsplash.com/photo-1557683316-973673baf926?q=80&w=1200&auto=format&fit=crop";
+
 // TS Interface representing the NGO Document
 export interface INGO extends Document {
   name: string;
   registrationNumber: string; // Official legal/gov registration ID
   adminId: mongoose.Types.ObjectId; // Links back to the NGO_ADMIN who created it
+  description: string;
+  category: string;
+  website: string;
+  profilePic: string;
+  coverImage: string;
   location: {
     address: string;
     type: "Point";
     coordinates: [number, number]; // [longitude, latitude] for geospatial filtering
   };
-  registrationDocuments: [String];
+  license: string;
+  regDoc: string;
+  documents: [{
+    title: string;
+    fileUrl: string
+  }];
+  socialLinks: {
+    insta: string;
+    twitter: string;
+    linkedIn: string;
+    yt: string;
+  },
   ngoAdmins: mongoose.Types.ObjectId[];
   ngoWorkers: mongoose.Types.ObjectId[];
   verificationStatus: 'PENDING' | 'APPROVED' | 'REJECTED'; // Handled by SUPER_ADMIN
@@ -18,10 +37,22 @@ export interface INGO extends Document {
   updatedAt: Date;
 }
 
+const defSocialLinks = {
+  insta: "",
+  twitter: "",
+  linkedIn: "",
+  yt: ""
+};
+
 const NGOSchema: Schema = new Schema<INGO>(
   {
     name: { type: String, required: true, unique: true, trim: true },
     registrationNumber: { type: String, required: true, unique: true, trim: true },
+    description: { type: String, trim: true, default: "" },
+    category: { type: String, trim: true, default: "" },
+    website: { type: String, trim: true, default: "" },
+    profilePic: { type: String, trim: true, default: DEFAULT_PROFILE_PIC },
+    coverImage: { type: String, trim: true, default: DEFAULT_COVER_IMAGE },
     adminId: {
       type: Schema.Types.ObjectId,
       ref: 'User',
@@ -35,7 +66,10 @@ const NGOSchema: Schema = new Schema<INGO>(
         required: true,
       },
     },
-    registrationDocuments: [{ type: String, required: true }],
+    license: { type: String, trim: true, required: true },
+    regDoc: { type: String, trim: true, required: true },
+    documents: [{ type: Object }],
+    socialLinks: { type: Object, default: defSocialLinks },
     ngoAdmins: [{ type: Schema.Types.ObjectId, ref: "User", default: [] }],
     ngoWorkers: [{ type: Schema.Types.ObjectId, ref: "User", default: [] }],
     verificationStatus: {

@@ -9,11 +9,11 @@ app.use(cors());
 app.use(cookieParser());
 
 app.get("/",(req, res)=>{
-    return res.status(200).json({"message":"All good at ngo_svc server."});
-})
+    return res.status(200).json({"message":"All good at ngo_svc server.", "status":"success"});
+});
 
 app.get("/api/ngo/health",(req, res)=>{
-    return res.status(200).json({"message":"NGO Management Service is healthy"});
+    return res.status(200).json({"message":"NGO Management Service is healthy", "status":"success"});
 });
 
 app.use("/api/ngo", ngoRouter);
