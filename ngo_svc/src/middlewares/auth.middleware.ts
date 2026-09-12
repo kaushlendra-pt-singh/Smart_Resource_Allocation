@@ -32,7 +32,7 @@ export async function authMiddleWare(req: Request, res: Response, next: NextFunc
 
 export const requireRoles = (allowedRoles: string[]) => {
     return (req: Request, res: Response, next: NextFunction) => {
-        if (!req.user || !allowedRoles.includes(req.user.role!)) {
+        if (!req.user || !req.user.role || !allowedRoles.includes(req.user.role)) {
             return res.status(403).json({ message: "Access Denied: Insufficient permissions." });
         }
         next();

@@ -14,6 +14,8 @@ import {
     updateNgoProfileController,
     transferOwnershipController,
     removeMemberController,
+    bulkVerifyNGOsController,
+    bulkDeleteNGOsController,
     deleteNgoController
 } from "../controllers/ngo.controllers.ts";
 
@@ -55,6 +57,22 @@ ngoRouter.get(
     authMiddleWare,
     requireRoles(['SUPER_ADMIN']),
     getPendingNGOsController
+);
+
+ngoRouter.patch(
+    "/bulk-verify",
+    rateLimiter,
+    authMiddleWare,
+    requireRoles(['SUPER_ADMIN']),
+    bulkVerifyNGOsController
+);
+
+ngoRouter.delete(
+    "/bulk-delete",
+    rateLimiter,
+    authMiddleWare,
+    requireRoles(['SUPER_ADMIN']),
+    bulkDeleteNGOsController
 );
 
 ngoRouter.get(

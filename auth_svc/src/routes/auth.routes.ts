@@ -10,6 +10,7 @@ import {
     forgotPasswordController,
     resetPasswordController,
     deleteUserController,
+    bulkDeleteUsersController,
     googleAuthController,
     addCoWorkerController,
     transferFounderRoleInternalController,
@@ -17,6 +18,7 @@ import {
     cleanupDeletedNgoInternalController
 } from "../controllers/user.controller.ts";
 import authMiddleware from "../middlewares/auth.middleware.ts";
+import { requireRoles } from "../middlewares/role.middleware.ts";
 import { verifyInternalKey } from "../middlewares/verifyinternalKey.ts";
 
 const authRouter = express.Router();
@@ -61,5 +63,12 @@ authRouter.patch("/reset-password/:token", rateLimiter, resetPasswordController)
 // ==========================================
 authRouter.get("/me", rateLimiter, authMiddleware, getUserProfileController);
 authRouter.delete("/delete", rateLimiter, authMiddleware, deleteUserController);
+authRouter.delete(
+    "/users/bulk-delete",
+    rateLimiter,
+    authMiddleware,
+    requireRoles(['SUPER_ADMIN']),
+    bulkDeleteUsersController
+);
 
 export default authRouter;

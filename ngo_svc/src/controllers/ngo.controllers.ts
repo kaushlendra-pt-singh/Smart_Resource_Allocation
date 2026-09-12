@@ -4,6 +4,7 @@ import { v2 as cloudinary } from "cloudinary";
 import { safeRedis } from "../config/redis.ts";
 import { RedisKeys } from "../utils/redisKeys.ts";
 import axios from "axios";
+import { bulkNgoVerificationQueue, bulkNgoDeletionQueue } from "../queues/ngo.queue.ts";
 
 
 export const registerNGOController = async (req: Request, res: Response): Promise<Response> => {
@@ -940,5 +941,85 @@ export const deleteNgoController = async (req: Request, res: Response): Promise<
     } catch (error: any) {
         console.error("Error in deleteNgoController:", error);
         return res.status(500).json({ status: "failed", message: "Internal server error deleting NGO." });
+    }
+};
+
+export const bulkVerifyNGOsController = async (req: Request, res: Response): Promise<Response> => {
+    try {
+        const { ngoIds, status } = req.body;
+        const adminUserId = req.user?._id?.toString();
+
+        if (!Array.isArray(ngoIds) || ngoIds.length === 0 || !status) {
+            return res.status(400).json({
+                status: "failed",
+                message: "ngoIds must be a non-empty array of strings."
+            });
+        }
+
+        if (!["APPROVED", "REJECTED"].includes(status)) {
+            return res.status(400).json({
+                status: "failed",
+                message: "status must be either 'APPROVED' or 'REJECTED'."
+            });
+        }
+
+        // Enqueue background job
+        const job = await bulkNgoVerificationQueue.add("bulk-verify-job", {
+            ngoIds,
+            status,
+            adminUserId
+        });
+
+        return res.status(202).json({
+            status: "success",
+            message: `Bulk verification request queued for ${ngoIds.length} NGOs. Processing in background.`,
+            data: {
+                jobId: job.id,
+                queuedCount: ngoIds.length,
+                targetStatus: status
+            }
+        });
+    } catch (error) {
+        console.error("Error in bulkVerifyNGOsController:", error);
+        return res.status(500).json({
+            status: "failed",
+            message: "Internal server error queuing bulk verification job."
+        });
+    }
+};
+
+
+export const bulkDeleteNGOsController = async (req: Request, res: Response): Promise<Response> => {
+    try {
+        const { ngoIds } = req.body;
+        const adminUserId = req.user?._id?.toString();
+
+        if (!Array.isArray(ngoIds) || ngoIds.length === 0) {
+            return res.status(400).json({
+                status: "failed",
+                message: "ngoIds must be a non-empty array of strings."
+            });
+        }
+
+        // Enqueue job in BullMQ
+        const job = await bulkNgoDeletionQueue.add("bulk-delete-job", {
+            ngoIds,
+            adminUserId
+        });
+
+        return res.status(202).json({
+            status: "success",
+            message: `Bulk deletion job queued for ${ngoIds.length} NGOs. Processing in background.`,
+            data: {
+                jobId: job.id,
+                queuedCount: ngoIds.length
+            }
+        });
+    } catch (error) {
+        console.error("Error in bulkDeleteNGOsController:", error);
+        return res.status(500).json({
+            status: "failed",
+            message: "Internal server error queuing bulk NGO deletion."
+        });
     }
 };

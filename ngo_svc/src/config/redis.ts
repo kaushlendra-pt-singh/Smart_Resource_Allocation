@@ -1,5 +1,13 @@
 import { createClient } from "redis";
 
+// Export raw connection options for BullMQ to consume internally
+export const redisConnectionOptions = {
+    host: process.env.REDIS_HOST || "127.0.0.1",
+    port: Number(process.env.REDIS_PORT) || 6379,
+    password: process.env.REDIS_PASSWORD || undefined,
+    maxRetriesPerRequest: null, // CRITICAL: Required by BullMQ
+};
+
 export const redisClient = createClient({
     url: process.env.REDIS_URL || "redis://localhost:6379",
     socket: {

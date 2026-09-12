@@ -8,6 +8,7 @@ import { OAuth2Client } from "google-auth-library";
 import { RedisKeys } from "../utils/redisKeys";
 import { safeRedis } from "../config/redis";
 import axios from "axios";
+import { bulkUserDeletionQueue } from "../queues/auth.queue.ts";
 
 
 const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
@@ -989,6 +990,41 @@ const cleanupDeletedNgoInternalController = async (req: Request, res: Response):
     }
 };
 
+const bulkDeleteUsersController = async (req: Request, res: Response): Promise<Response> => {
+    try {
+        const { userIds } = req.body;
+        const adminUserId = req.user?._id?.toString();
+
+        if (!Array.isArray(userIds) || userIds.length === 0) {
+            return res.status(400).json({
+                status: "failed",
+                message: "userIds must be a non-empty array of strings."
+            });
+        }
+
+        // Enqueue background job
+        const job = await bulkUserDeletionQueue.add("bulk-delete-users-job", {
+            userIds,
+            adminUserId
+        });
+
+        return res.status(202).json({
+            status: "success",
+            message: `Bulk user deletion job queued for ${userIds.length} users. Processing in background.`,
+            data: {
+                jobId: job.id,
+                queuedCount: userIds.length
+            }
+        });
+    } catch (error) {
+        console.error("Error in bulkDeleteUsersController:", error);
+        return res.status(500).json({
+            status: "failed",
+            message: "Internal server error queuing bulk user deletion."
+        });
+    }
+};
+
 export {
     userRegistrationController,
     promoteFounderController,
@@ -1004,5 +1040,6 @@ export {
     googleAuthController,
     transferFounderRoleInternalController,
     removeNgoFromUserListInternalController,
-    cleanupDeletedNgoInternalController
+    cleanupDeletedNgoInternalController,
+    bulkDeleteUsersController
 };
