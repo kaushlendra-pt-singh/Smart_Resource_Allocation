@@ -2,6 +2,7 @@ import express from "express";
 import { rateLimiter } from "../middlewares/rate_limit.middleware.ts";
 import {
     userRegistrationController,
+    updateUserProfileController,
     promoteFounderController,
     userRefreshTokenController,
     userLoginController,
@@ -51,6 +52,7 @@ authRouter.post(
 // 2. Public Authentication & Account Routes
 // ==========================================
 authRouter.post("/register", rateLimiter, userRegistrationController);
+authRouter.patch("/profile", rateLimiter, authMiddleware, updateUserProfileController);
 authRouter.post("/login", rateLimiter, userLoginController);
 authRouter.post("/google-auth", rateLimiter, googleAuthController);
 authRouter.post("/refresh-token", rateLimiter, userRefreshTokenController);

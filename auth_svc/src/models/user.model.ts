@@ -19,6 +19,7 @@ export interface IUser extends Document {
   passwordResetToken?: string;
   passwordResetExpires?: Date;
   phone: string;
+  profilePic: string;
   role: UserRole;
   ngoId: mongoose.Types.ObjectId | null; // Null for SUPER_ADMIN & standalone RESIDENTs
   verificationStatus: verificationTypes; // For NGO workers requiring admin approval
@@ -40,6 +41,7 @@ const UserSchema: Schema = new Schema<IUser>(
     passwordResetToken: { type: String, select: false },
     passwordResetExpires: { type: Date, select: false },
     phone: { type: String, required: true, trim: true },
+    profilePic: { type: String, default: "https://cdn-icons-png.flaticon.com/512/149/149071.png", trim: true },
     role: {
       type: String,
       enum: ['SUPER_ADMIN', 'NGO_ADMIN', 'GROUND_WORKER', 'RESIDENT', 'VOLUNTEER'],

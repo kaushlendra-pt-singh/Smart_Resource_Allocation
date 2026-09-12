@@ -23,7 +23,7 @@ const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
 const userRegistrationController = async (req: Request, res: Response): Promise<Response> => {
     try {
-        const { name, email, password, phone } = req.body;
+        const { name, email, password, phone, profilePic } = req.body;
 
         if (!name || !email || !password || !phone) {
             return res.status(400).json({ message: "All core fields are required.", status: "failed" });
@@ -58,6 +58,7 @@ const userRegistrationController = async (req: Request, res: Response): Promise<
             passwordHash: password,
             phone,
             role: 'RESIDENT',
+            profilePic: profilePic || "https://cdn-icons-png.flaticon.com/512/149/149071.png",
             joinedNGOs: []
         });
 
@@ -108,6 +109,81 @@ const userRegistrationController = async (req: Request, res: Response): Promise<
 
         console.error("Error in user registration:", error);
         return res.status(500).json({ message: "Internal server error in user registration.", status: "failed" });
+    }
+};
+
+const updateUserProfileController = async (req: Request, res: Response): Promise<Response> => {
+    try {
+        const userId = req.user?._id?.toString();
+        if (!userId) {
+            return res.status(401).json({ status: "failed", message: "Unauthorized context." });
+        }
+
+        const { name, phone, profilePic } = req.body;
+
+        // 1. Build dynamic update payload with strictly allowed fields
+        const updates: Record<string, any> = {};
+
+        if (name !== undefined) updates.name = name.trim();
+        if (phone !== undefined) updates.phone = phone.trim();
+        if (profilePic !== undefined) updates.profilePic = profilePic.trim();
+
+        if (Object.keys(updates).length === 0) {
+            return res.status(400).json({
+                status: "failed",
+                message: "No valid fields provided for update. Only 'name', 'phone', and 'profilePic' can be updated."
+            });
+        }
+
+        // 2. Update MongoDB Document
+        const updatedUser = await userModel.findByIdAndUpdate(
+            userId,
+            { $set: updates },
+            { new: true, runValidators: true }
+        ).select("-passwordHash");
+
+        if (!updatedUser) {
+            return res.status(404).json({
+                status: "failed",
+                message: "User profile not found."
+            });
+        }
+
+        // 3. Construct updated user payload
+        const userPayload = {
+            _id: updatedUser._id.toString(),
+            name: updatedUser.name,
+            email: updatedUser.email,
+            phone: updatedUser.phone || null,
+            role: updatedUser.role,
+            profilePic: updatedUser.profilePic,
+            joinedNGOs: updatedUser.joinedNGOs ?? [],
+            verificationStatus: updatedUser.verificationStatus,
+            isActive: updatedUser.isActive,
+            isGoogleUser: updatedUser.isGoogleUser,
+            createdAt: updatedUser.createdAt,
+            updatedAt: updatedUser.updatedAt
+        };
+
+        // 4. Invalidate & refresh Redis profile cache
+        await safeRedis.set(
+            RedisKeys.userProfile(userId),
+            JSON.stringify(userPayload),
+            { EX: 24 * 60 * 60 }
+        );
+
+        return res.status(200).json({
+            status: "success",
+            message: "User profile updated successfully.",
+            user: userPayload
+        });
+
+    } catch (error: any) {
+        console.error("Error in updateUserProfileController:", error);
+        return res.status(500).json({
+            status: "failed",
+            message: "Internal server error updating user profile."
+        });
     }
 };
 
@@ -1027,6 +1103,7 @@ const bulkDeleteUsersController = async (req: Request, res: Response): Promise<R
 
 export {
     userRegistrationController,
+    updateUserProfileController,
     promoteFounderController,
     promoteCoAdminController,
     addCoWorkerController,
