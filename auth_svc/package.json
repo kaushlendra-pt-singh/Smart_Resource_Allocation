@@ -5,7 +5,7 @@
   "private": true,
   "scripts": {
     "dev:api": "bun --watch ./index.ts",
-    "dev:worker": "bun --watch ./src/workers/auth.worker.ts"
+    "dev:worker": "bun --watch ./workers.ts"
   },
   "devDependencies": {
     "@types/axios": "^0.14.4",
