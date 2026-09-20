@@ -3,6 +3,12 @@
   "module": "index.ts",
   "type": "module",
   "private": true,
+  "scripts": {
+    "dev": "bun --watch ./index.ts",
+    "dev:worker": "bun --watch ./workers.ts",
+    "start": "bun ./index.ts",
+    "start:worker": "bun ./workers.ts"
+  },
   "devDependencies": {
     "@types/bun": "latest",
     "@types/cors": "^2.8.19",

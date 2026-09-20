@@ -4,8 +4,10 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "dev:api": "bun --watch ./index.ts",
-    "dev:worker": "bun --watch ./workers.ts"
+    "dev": "bun --watch ./index.ts",
+    "dev:worker": "bun --watch ./workers.ts",
+    "start": "bun ./index.ts",
+    "start:worker": "bun ./workers.ts"
   },
   "devDependencies": {
     "@types/axios": "^0.14.4",
