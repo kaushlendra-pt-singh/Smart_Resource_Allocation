@@ -34,6 +34,6 @@ invenRouter.get(
     authMiddleWare,
     requireRoles(["SUPER_ADMIN", "NGO_ADMIN"]),
     getInventoryLedger
-)
+);
 
 export default invenRouter;

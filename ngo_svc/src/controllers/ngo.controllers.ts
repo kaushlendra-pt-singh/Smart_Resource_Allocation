@@ -5,6 +5,7 @@ import { safeRedis } from "../config/redis";
 import { RedisKeys } from "../utils/redisKeys";
 import axios from "axios";
 import { bulkNgoVerificationQueue, bulkNgoDeletionQueue } from "../queues/ngo.queue";
+import { isValidCoordinates } from "../utils/validateCords";
 
 
 export const registerNGOController = async (req: Request, res: Response): Promise<Response> => {
@@ -20,7 +21,7 @@ export const registerNGOController = async (req: Request, res: Response): Promis
             });
         }
 
-        if (!location.address || !Array.isArray(location.coordinates) || location.coordinates.length !== 2) {
+        if (!location.address || !Array.isArray(location.coordinates) || location.coordinates.length !== 2 || !isValidCoordinates(location.coordinates)) {
             return res.status(400).json({
                 status: "failed",
                 message: "Invalid location format. Must include address and coordinates [longitude, latitude]."

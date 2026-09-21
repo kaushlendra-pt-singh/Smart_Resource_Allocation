@@ -5,9 +5,10 @@ export interface IInventory extends Document {
     resourceId: mongoose.Types.ObjectId;
     warehouseName: string;
     location: {
+        address?: string;
         city: string;
         state: string;
-        coordinates?: [number, number]; // [longitude, latitude] for geographical spatial queries
+        coordinates: [number, number]; // [longitude, latitude] for geographical spatial queries
     };
     totalQuantity: number;
     reservedQuantity: number;
@@ -28,9 +29,10 @@ const InventorySchema: Schema = new Schema<IInventory>(
         },
         warehouseName: { type: String, required: true, trim: true },
         location: {
+            address: { type: String, trim: true },
             city: { type: String, required: true, trim: true },
             state: { type: String, required: true, trim: true },
-            coordinates: { type: [Number], index: "2dsphere" } // Optional geospatial indexing for location algorithms
+            coordinates: { required: true, type: [Number], index: "2dsphere" } // Optional geospatial indexing for location algorithms
         },
         totalQuantity: { type: Number, required: true, min: 0, default: 0 },
         reservedQuantity: { type: Number, required: true, min: 0, default: 0 },

@@ -5,13 +5,14 @@ import { InventoryLedger } from "../models/ledger.model";
 import { Resource } from "../models/resource.model";
 import { safeRedis } from "../config/redis";
 import { RedisKeys } from "../utils/redisKeys";
+import { isValidCoordinates } from "../utils/validateCords";
 
 export const restockInventory = async (req: Request, res: Response): Promise<Response> => {
     const session = await mongoose.startSession();
     session.startTransaction();
 
     try {
-        const { ngoId, resourceId, warehouseName, city, state, coordinates, quantity, performedBy, notes } = req.body;
+        const { ngoId, resourceId, warehouseName, address, city, state, coordinates, quantity, performedBy, notes } = req.body;
 
         if (!ngoId || !resourceId || !warehouseName || !city || !state || !quantity || !performedBy) {
             await session.abortTransaction();
@@ -41,13 +42,22 @@ export const restockInventory = async (req: Request, res: Response): Promise<Res
         }
 
         // Verify resource existence
-        const resourceExists = await Resource.findById(resourceId).session(session);
+        const resourceExists = await Resource.findById({ ngoId, resourceId }).session(session);
         if (!resourceExists) {
             await session.abortTransaction();
             session.endSession();
             return res.status(404).json({
                 status: "failed",
                 message: `Resource with ID ${resourceId} does not exist.`
+            });
+        }
+
+        if (!resourceExists && (!coordinates || !isValidCoordinates(coordinates))) {
+            await session.abortTransaction();
+            session.endSession();
+            return res.status(400).json({
+                status: "failed",
+                message: "Geospatial coordinates [longitude, latitude] are required when creating a new warehouse inventory record."
             });
         }
 
@@ -65,6 +75,7 @@ export const restockInventory = async (req: Request, res: Response): Promise<Res
                     warehouseName: warehouseName.trim(),
                     "location.city": city.trim(),
                     "location.state": state.trim(),
+                    "location.address": address.trim() || "",
                     ...(coordinates ? { "location.coordinates": coordinates } : {})
                 }
             },
