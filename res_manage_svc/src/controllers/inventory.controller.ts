@@ -1,0 +1,424 @@
+import type { Request, Response } from "express";
+import mongoose from "mongoose";
+import { Inventory } from "../models/inventory.model.ts";
+import { InventoryLedger } from "../models/ledger.model.ts";
+import { Resource } from "../models/resource.model.ts";
+import { safeRedis } from "../config/redis.ts";
+import { RedisKeys } from "../utils/redisKeys.ts";
+
+export const restockInventory = async (req: Request, res: Response): Promise<Response> => {
+    const session = await mongoose.startSession();
+    session.startTransaction();
+
+    try {
+        const { ngoId, resourceId, warehouseName, city, state, coordinates, quantity, performedBy, notes } = req.body;
+
+        if (!ngoId || !resourceId || !warehouseName || !city || !state || !quantity || !performedBy) {
+            await session.abortTransaction();
+            session.endSession();
+            return res.status(400).json({
+                status: "failed",
+                message: "ngoId, resourceId, warehouseName, city, state, quantity, and performedBy are required."
+            });
+        }
+
+        if (typeof quantity !== "number" || quantity <= 0) {
+            await session.abortTransaction();
+            session.endSession();
+            return res.status(400).json({
+                status: "failed",
+                message: "Quantity must be a positive number greater than 0."
+            });
+        }
+
+        if (!mongoose.Types.ObjectId.isValid(resourceId as string)) {
+            await session.abortTransaction();
+            session.endSession();
+            return res.status(400).json({
+                status: "failed",
+                message: "Invalid Resource ID format."
+            });
+        }
+
+        // Verify resource existence
+        const resourceExists = await Resource.findById(resourceId).session(session);
+        if (!resourceExists) {
+            await session.abortTransaction();
+            session.endSession();
+            return res.status(404).json({
+                status: "failed",
+                message: `Resource with ID ${resourceId} does not exist.`
+            });
+        }
+
+        // Upsert Inventory (Creates if new, increments totalQuantity if existing)
+        const inventory = await Inventory.findOneAndUpdate(
+            {
+                ngoId,
+                resourceId,
+                warehouseName: warehouseName.trim()
+            },
+            {
+                $inc: { totalQuantity: quantity }, $setOnInsert: {
+                    ngoId,
+                    resourceId,
+                    warehouseName: warehouseName.trim(),
+                    "location.city": city.trim(),
+                    "location.state": state.trim(),
+                    ...(coordinates ? { "location.coordinates": coordinates } : {})
+                }
+            },
+            {
+                new: true,
+                upsert: true,
+                session,
+                runValidators: true
+            }
+        );
+
+        // Record Audit Ledger
+        await InventoryLedger.create(
+            [
+                {
+                    inventoryId: inventory._id,
+                    resourceId,
+                    action: "RESTOCK",
+                    quantity,
+                    performedBy: performedBy.trim(),
+                    notes: notes ? notes.trim() : `Restocked ${quantity} units at ${warehouseName}`
+                }
+            ],
+            { session }
+        );
+
+        await session.commitTransaction();
+        session.endSession();
+
+        // Sync with Redis using correct wrapper methods
+        const inventoryIdStr = inventory._id.toString();
+        const availableQty = Math.max(0, inventory.totalQuantity - inventory.reservedQuantity);
+
+        const stockPayload = JSON.stringify({
+            inventoryId: inventoryIdStr,
+            ngoId,
+            resourceId,
+            totalQuantity: inventory.totalQuantity,
+            reservedQuantity: inventory.reservedQuantity,
+            availableQuantity: availableQty
+        });
+
+        await Promise.all([
+            // 1. Inventory stock details by inventory ID
+            safeRedis.set(RedisKeys.inventoryStock(inventoryIdStr), stockPayload, { EX: 86400 }),
+
+            // 2. Warehouse & Resource mapping details
+            safeRedis.set(
+                RedisKeys.warehouseResourceStock(warehouseName.trim(), resourceId as string),
+                stockPayload,
+                { EX: 86400 }
+            ),
+
+            // 3. Atomically increment global available stock by the restocked quantity!
+            safeRedis.incrBy(
+                RedisKeys.resourceGlobalAvailableCount(resourceId as string),
+                quantity
+            ),
+
+            // 4. Update geospatial index
+            coordinates && coordinates.length === 2
+                ? safeRedis.geoAdd(
+                    RedisKeys.warehouseLocations(),
+                    coordinates[0],
+                    coordinates[1],
+                    `${warehouseName.trim()}:${inventoryIdStr}`
+                )
+                : Promise.resolve()
+        ]);
+
+        return res.status(200).json({
+            status: "success",
+            message: `Successfully restocked ${quantity} units.`,
+            data: {
+                inventoryId: inventory._id,
+                ngoId: inventory.ngoId,
+                warehouseName: inventory.warehouseName,
+                totalQuantity: inventory.totalQuantity,
+                reservedQuantity: inventory.reservedQuantity,
+                availableQuantity: availableQty
+            }
+        });
+    } catch (error) {
+        await session.abortTransaction();
+        session.endSession();
+        console.error("Error in restockInventory:", error);
+        return res.status(500).json({
+            status: "failed",
+            message: "Internal server error while processing inventory restock."
+        });
+    }
+};
+
+export const getInventoryByLocation = async (req: Request, res: Response): Promise<Response> => {
+    try {
+        const { warehouseName, resourceId, lng, lat, maxDistanceKm = "50", ngoId, page = "1", limit = "10" } = req.query;
+
+        // 1. FAST PATH: Direct Redis Lookup using Key #3 (If searching by specific warehouse & resource)
+        if (warehouseName && resourceId && typeof warehouseName === "string" && typeof resourceId === "string") {
+            const cacheKey = RedisKeys.warehouseResourceStock(warehouseName.trim(), resourceId.trim());
+            const cachedStock = await safeRedis.get(cacheKey);
+
+            if (cachedStock) {
+                const stockData = JSON.parse(cachedStock);
+                return res.status(200).json({
+                    status: "success",
+                    message: "Inventory retrieved from Redis cache.",
+                    data: [stockData],
+                    source: "cache"
+                });
+            }
+        }
+
+        // 2. SLOW PATH: Query MongoDB for complex geospatial or filtered queries
+        const filter: Record<string, any> = {};
+
+        // Geospatial Radius Filter ($near using 2dsphere index)
+        if (lng && lat) {
+            const longitude = parseFloat(lng as string);
+            const latitude = parseFloat(lat as string);
+            const maxMeters = parseFloat(maxDistanceKm as string) * 1000;
+
+            if (!isNaN(longitude) && !isNaN(latitude)) {
+                filter["location.coordinates"] = {
+                    $near: {
+                        $geometry: {
+                            type: "Point",
+                            coordinates: [longitude, latitude]
+                        },
+                        $maxDistance: maxMeters
+                    }
+                };
+            }
+        }
+
+        if (warehouseName) {
+            filter.warehouseName = (warehouseName as string).trim();
+        }
+
+        if (ngoId) {
+            filter.ngoId = (ngoId as string).trim();
+        }
+
+        if (resourceId) {
+            if (!mongoose.Types.ObjectId.isValid(resourceId as string)) {
+                return res.status(400).json({
+                    status: "failed",
+                    message: "Invalid resourceId format."
+                });
+            }
+            filter.resourceId = resourceId;
+        }
+
+        const pageNum = Math.max(1, parseInt(page as string, 10) || 1);
+        const limitNum = Math.max(1, parseInt(limit as string, 10) || 10);
+        const skip = (pageNum - 1) * limitNum;
+
+        const [inventoryItems, totalCount] = await Promise.all([
+            Inventory.find(filter)
+                .populate({
+                    path: "resourceId",
+                    select: "name category unit isPerishable"
+                })
+                .skip(skip)
+                .limit(limitNum)
+                .lean({ virtuals: true }),
+            Inventory.countDocuments(filter)
+        ]);
+
+        return res.status(200).json({
+            status: "success",
+            message: "Nearby inventory retrieved successfully.",
+            data: inventoryItems,
+            source: "database",
+            pagination: {
+                totalItems: totalCount,
+                currentPage: pageNum,
+                totalPages: Math.ceil(totalCount / limitNum),
+                pageSize: limitNum
+            }
+        });
+    } catch (error) {
+        console.error("Error in getInventoryByLocation:", error);
+        return res.status(500).json({
+            status: "failed",
+            message: "Internal server error while fetching location inventory."
+        });
+    }
+};
+
+export const dispatchInventory = async (req: Request, res: Response): Promise<Response> => {
+    const session = await mongoose.startSession();
+    session.startTransaction();
+
+    try {
+        const { inventoryId, requestingNgoId, quantity, performedBy, notes } = req.body;
+
+        // 1. Basic Input Validation
+        if (!inventoryId || !requestingNgoId || !quantity || !performedBy) {
+            await session.abortTransaction();
+            session.endSession();
+            return res.status(400).json({
+                status: "failed",
+                message: "inventoryId, requestingNgoId, quantity, and performedBy are required."
+            });
+        }
+
+        if (typeof quantity !== "number" || quantity <= 0) {
+            await session.abortTransaction();
+            session.endSession();
+            return res.status(400).json({
+                status: "failed",
+                message: "Quantity must be a positive number greater than 0."
+            });
+        }
+
+        // 2. Fetch inventory record inside session
+        const inventory = await Inventory.findById(inventoryId).session(session);
+
+        if (!inventory) {
+            await session.abortTransaction();
+            session.endSession();
+            return res.status(404).json({
+                status: "failed",
+                message: `Inventory document with ID ${inventoryId} not found.`
+            });
+        }
+
+        const isOwnerNgo = inventory.ngoId === requestingNgoId;
+        const availableQty = Math.max(0, inventory.totalQuantity - inventory.reservedQuantity);
+
+        // 3. Enforce NGO Tier-Based Allocation Guard
+        let dispatchAmount = 0;
+        let decrementReserved = 0;
+
+        if (availableQty >= quantity) {
+            // Case A: Unreserved stock is sufficient -> Any NGO can take the full requested amount
+            dispatchAmount = quantity;
+            decrementReserved = 0; // Outgoing stock came from unreserved pool
+        } else if (isOwnerNgo) {
+            // Case B: Requesting NGO OWNS this inventory -> Can dip into reserved stock!
+            if (inventory.totalQuantity < quantity) {
+                await session.abortTransaction();
+                session.endSession();
+                return res.status(400).json({
+                    status: "failed",
+                    message: `Insufficient overall stock. Total available in warehouse is ${inventory.totalQuantity}, requested ${quantity}.`
+                });
+            }
+            dispatchAmount = quantity;
+            // Deduct from reserved pool for any amount beyond availableQty
+            decrementReserved = quantity - availableQty;
+        } else {
+            // Case C: Outside NGO and requestedQty > availableQty -> Cap dispatch to availableQty only!
+            if (availableQty === 0) {
+                await session.abortTransaction();
+                session.endSession();
+                return res.status(403).json({
+                    status: "failed",
+                    message: `Access denied. Unreserved stock is 0. The remaining ${inventory.reservedQuantity} reserved units belong exclusively to NGO "${inventory.ngoId}".`
+                });
+            }
+            // Cap dispatch amount to availableQty
+            dispatchAmount = availableQty;
+            decrementReserved = 0;
+        }
+
+        // 4. Perform Atomic Database Update
+        const updatedInventory = await Inventory.findOneAndUpdate(
+            {
+                _id: inventoryId,
+                totalQuantity: { $gte: dispatchAmount },
+                reservedQuantity: { $gte: decrementReserved }
+            },
+            {
+                $inc: {
+                    totalQuantity: -dispatchAmount,
+                    reservedQuantity: -decrementReserved
+                }
+            },
+            { new: true, session, runValidators: true }
+        );
+
+        if (!updatedInventory) {
+            await session.abortTransaction();
+            session.endSession();
+            return res.status(400).json({
+                status: "failed",
+                message: "Stock dispatch failed due to concurrent update conflicts."
+            });
+        }
+
+        // 5. Record Audit Ledger Entry
+        await InventoryLedger.create(
+            [
+                {
+                    inventoryId: updatedInventory._id,
+                    resourceId: updatedInventory.resourceId,
+                    action: "DISPATCH",
+                    quantity: -dispatchAmount,
+                    performedBy: performedBy.trim(),
+                    notes: notes
+                        ? notes.trim()
+                        : `Dispatched ${dispatchAmount} units to NGO ${requestingNgoId} from warehouse ${updatedInventory.warehouseName}`
+                }
+            ],
+            { session }
+        );
+
+        // 6. Commit DB Transaction
+        await session.commitTransaction();
+        session.endSession();
+
+        // 7. Update Redis Caches
+        const inventoryIdStr = updatedInventory._id.toString();
+        const resourceIdStr = updatedInventory.resourceId.toString();
+        const newAvailableQty = Math.max(0, updatedInventory.totalQuantity - updatedInventory.reservedQuantity);
+
+        const stockPayload = JSON.stringify({
+            inventoryId: inventoryIdStr,
+            ngoId: updatedInventory.ngoId,
+            resourceId: resourceIdStr,
+            totalQuantity: updatedInventory.totalQuantity,
+            reservedQuantity: updatedInventory.reservedQuantity,
+            availableQuantity: newAvailableQty
+        });
+
+        await Promise.all([
+            safeRedis.set(RedisKeys.inventoryStock(inventoryIdStr), stockPayload, { EX: 86400 }),
+            safeRedis.set(RedisKeys.warehouseResourceStock(updatedInventory.warehouseName, resourceIdStr), stockPayload, { EX: 86400 }),
+            safeRedis.decrBy(RedisKeys.resourceGlobalAvailableCount(resourceIdStr), dispatchAmount)
+        ]);
+
+        return res.status(200).json({
+            status: "success",
+            message: dispatchAmount < quantity
+                ? `Partial dispatch fulfilled. Allocated maximum available unreserved stock of ${dispatchAmount} units (requested ${quantity}).`
+                : `Successfully dispatched ${dispatchAmount} units.`,
+            data: {
+                inventoryId: updatedInventory._id,
+                warehouseName: updatedInventory.warehouseName,
+                dispatchedQuantity: dispatchAmount,
+                totalQuantity: updatedInventory.totalQuantity,
+                reservedQuantity: updatedInventory.reservedQuantity,
+                availableQuantity: newAvailableQty
+            }
+        });
+    } catch (error) {
+        await session.abortTransaction();
+        session.endSession();
+        console.error("Error in dispatchInventory:", error);
+        return res.status(500).json({
+            status: "failed",
+            message: "Internal server error while dispatching inventory."
+        });
+    }
+};

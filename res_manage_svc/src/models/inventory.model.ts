@@ -1,6 +1,7 @@
 import mongoose, { Schema, Document } from "mongoose";
 
 export interface IInventory extends Document {
+    ngoId: string;
     resourceId: mongoose.Types.ObjectId;
     warehouseName: string;
     location: {
@@ -18,6 +19,7 @@ export interface IInventory extends Document {
 
 const InventorySchema: Schema = new Schema<IInventory>(
     {
+        ngoId: { type: String, required: true, index: true },
         resourceId: {
             type: Schema.Types.ObjectId,
             ref: "Resource",
@@ -38,7 +40,7 @@ const InventorySchema: Schema = new Schema<IInventory>(
 );
 
 // Compound index to ensure a resource is listed once per warehouse location
-InventorySchema.index({ resourceId: 1, warehouseName: 1 }, { unique: true });
+InventorySchema.index({ ngoId: 1, resourceId: 1, warehouseName: 1 }, { unique: true });
 
 // Virtual field to get real-time available quantity safely
 InventorySchema.virtual("availableQuantity").get(function (this: IInventory) {

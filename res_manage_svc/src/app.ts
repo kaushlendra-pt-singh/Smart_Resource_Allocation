@@ -1,7 +1,8 @@
 import express, { type Express, type Request, type Response } from "express";
 import cors from "cors";
 import helmet from "helmet";
-import resRouter from "./routes/resource.route";
+import resRouter from "./routes/resource.route.ts";
+import invenRouter from "./routes/inventory.route.ts";
 
 const app: Express = express();
 
@@ -18,5 +19,6 @@ app.get("/health", (req: Request, res: Response) => {
 });
 
 app.use("/api/resources",resRouter);
+app.use("/api/inventory", invenRouter);
 
 export default app;

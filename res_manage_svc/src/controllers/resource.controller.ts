@@ -1,32 +1,4 @@
 /*
-
-2. Inventory & Stock Management Controllers (inventory.controller.ts)
-Manages physical warehouse stock, restocking, and manual stock updates.
-
-restockInventory
-
-Method / Route: POST /api/v1/inventory/restock
-
-Role: Admin / Warehouse Manager
-
-Description: Increases totalQuantity for a specific resource at a warehouse. Uses a Mongoose session to atomically update inventory and record a RESTOCK entry in InventoryLedger.
-
-getInventoryByLocation
-
-Method / Route: GET /api/v1/inventory
-
-Role: Authenticated Users
-
-Description: Queries available stock across warehouses. Supports filtering by city, state, or resourceId.
-
-dispatchInventory
-
-Method / Route: POST /api/v1/inventory/dispatch
-
-Role: Admin / Warehouse Manager
-
-Description: Called when physical items leave the warehouse. Reduces both reservedQuantity and totalQuantity atomically and writes a DISPATCH ledger record.
-
 3. Internal Inter-Service Controllers (reservation.controller.ts)
 Protected by x-interservice-token middleware. Called directly by allocation_svc (Python) during automated resource matching.
 
@@ -69,7 +41,6 @@ import { InventoryLedger } from "../models/ledger.model";
 import { Resource } from "../models/resource.model";
 import { safeRedis } from "../config/redis";
 import { RedisKeys } from "../utils/redisKeys";
-import { tryCatch } from "bullmq";
 
 export const createResource = async (req: Request, res: Response): Promise<Response> => {
     try {

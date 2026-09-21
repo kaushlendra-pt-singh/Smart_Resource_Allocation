@@ -37,6 +37,33 @@ export const connectRedis = async () => {
 };
 
 export const safeRedis = {
+    /**
+     * Safely increments an integer counter in Redis by a given step.
+     * Returns the updated numeric value, or null if Redis fails.
+     */
+    incrBy: async (key: string, increment: number): Promise<number | null> => {
+        try {
+            if (!redisClient.isOpen) return null;
+            return await redisClient.incrBy(key, increment);
+        } catch (error) {
+            console.error(`[safeRedis] Error in incrBy for key "${key}":`, error);
+            return null;
+        }
+    },
+
+    /**
+     * Safely decrements an integer counter in Redis by a given step.
+     * Returns the updated numeric value, or null if Redis fails.
+     */
+    decrBy: async (key: string, decrement: number): Promise<number | null> => {
+        try {
+            if (!redisClient.isOpen) return null;
+            return await redisClient.decrBy(key, decrement);
+        } catch (error) {
+            console.error(`[safeRedis] Error in decrBy for key "${key}":`, error);
+            return null;
+        }
+    },
     get: async (key: string): Promise<string | null> => {
         try {
             if (!redisClient.isOpen) return null;
