@@ -1,5 +1,5 @@
 import { Queue } from "bullmq";
-import { redisConnectionOptions } from "../config/redis.ts";
+import { redisConnectionOptions } from "../config/redis";
 
 export const BULK_NGO_VERIFICATION_QUEUE = "bulk-ngo-verification-queue";
 export const BULK_NGO_DELETION_QUEUE = "bulk-ngo-deletion-queue";

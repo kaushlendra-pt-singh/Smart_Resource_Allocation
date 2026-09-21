@@ -1,5 +1,5 @@
 import express from "express";
-import { rateLimiter } from "../middlewares/rate_limit.middleware.ts";
+import { rateLimiter } from "../middlewares/rate_limit.middleware";
 import {
     userRegistrationController,
     updateUserProfileController,
@@ -17,10 +17,10 @@ import {
     transferFounderRoleInternalController,
     removeNgoFromUserListInternalController,
     cleanupDeletedNgoInternalController
-} from "../controllers/user.controller.ts";
-import authMiddleware from "../middlewares/auth.middleware.ts";
-import { requireRoles } from "../middlewares/role.middleware.ts";
-import { verifyInternalKey } from "../middlewares/verifyinternalKey.ts";
+} from "../controllers/user.controller";
+import authMiddleware from "../middlewares/auth.middleware";
+import { requireRoles } from "../middlewares/role.middleware";
+import { verifyInternalKey } from "../middlewares/verifyinternalKey";
 
 const authRouter = express.Router();
 

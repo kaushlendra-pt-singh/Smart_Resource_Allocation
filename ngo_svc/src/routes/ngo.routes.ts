@@ -1,5 +1,5 @@
 import express from "express";
-import rateLimiter from "../middlewares/rateLimit.middleware.ts";
+import rateLimiter from "../middlewares/rateLimit.middleware";
 
 import {
     registerNGOController,
@@ -17,11 +17,11 @@ import {
     bulkVerifyNGOsController,
     bulkDeleteNGOsController,
     deleteNgoController
-} from "../controllers/ngo.controllers.ts";
+} from "../controllers/ngo.controllers";
 
-import { authMiddleWare, requireRoles } from "../middlewares/auth.middleware.ts";
-import { optionalAuth } from "../middlewares/optionalAuth.ts";
-import { verifyInternalKey } from "../middlewares/verufyInternalKey.ts";
+import { authMiddleWare, requireRoles } from "../middlewares/auth.middleware";
+import { optionalAuth } from "../middlewares/optionalAuth";
+import { verifyInternalKey } from "../middlewares/verufyInternalKey";
 
 const ngoRouter = express.Router();
 

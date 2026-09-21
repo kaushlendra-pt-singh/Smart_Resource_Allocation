@@ -1,5 +1,5 @@
-import { bulkUserDeletionWorker } from "./src/workers/auth.worker.ts";
-import { redisClient } from "./src/config/redis.ts";
+import { bulkUserDeletionWorker } from "./src/workers/auth.worker";
+import { redisClient } from "./src/config/redis";
 import mongoose from "mongoose";
 
 console.log("⚡ Background Worker Service started...");

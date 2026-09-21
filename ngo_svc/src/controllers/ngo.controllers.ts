@@ -1,10 +1,10 @@
-import ngoModel from "../models/ngo.model.ts";
+import ngoModel from "../models/ngo.model";
 import type { Request, Response } from "express";
 import { v2 as cloudinary } from "cloudinary";
-import { safeRedis } from "../config/redis.ts";
-import { RedisKeys } from "../utils/redisKeys.ts";
+import { safeRedis } from "../config/redis";
+import { RedisKeys } from "../utils/redisKeys";
 import axios from "axios";
-import { bulkNgoVerificationQueue, bulkNgoDeletionQueue } from "../queues/ngo.queue.ts";
+import { bulkNgoVerificationQueue, bulkNgoDeletionQueue } from "../queues/ngo.queue";
 
 
 export const registerNGOController = async (req: Request, res: Response): Promise<Response> => {

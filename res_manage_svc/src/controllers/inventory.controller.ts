@@ -1,10 +1,10 @@
 import type { Request, Response } from "express";
 import mongoose from "mongoose";
-import { Inventory } from "../models/inventory.model.ts";
-import { InventoryLedger } from "../models/ledger.model.ts";
-import { Resource } from "../models/resource.model.ts";
-import { safeRedis } from "../config/redis.ts";
-import { RedisKeys } from "../utils/redisKeys.ts";
+import { Inventory } from "../models/inventory.model";
+import { InventoryLedger } from "../models/ledger.model";
+import { Resource } from "../models/resource.model";
+import { safeRedis } from "../config/redis";
+import { RedisKeys } from "../utils/redisKeys";
 
 export const restockInventory = async (req: Request, res: Response): Promise<Response> => {
     const session = await mongoose.startSession();
@@ -419,6 +419,90 @@ export const dispatchInventory = async (req: Request, res: Response): Promise<Re
         return res.status(500).json({
             status: "failed",
             message: "Internal server error while dispatching inventory."
+        });
+    }
+};
+
+export const getInventoryLedger = async (req: Request, res: Response): Promise<Response> => {
+    try {
+        const { inventoryId } = req.params;
+        const { action, page = "1", limit = "20" } = req.query;
+
+        // 1. Validate Inventory ID Format
+        if (!inventoryId || !mongoose.Types.ObjectId.isValid(inventoryId.toString())) {
+            return res.status(400).json({
+                status: "failed",
+                message: "Valid inventoryId parameter is required."
+            });
+        }
+
+        // 2. Verify Inventory Record Exists
+        const inventoryExists = await Inventory.exists({ _id: inventoryId });
+        if (!inventoryExists) {
+            return res.status(404).json({
+                status: "failed",
+                message: `Inventory document with ID ${inventoryId} not found.`
+            });
+        }
+
+        // 3. Build Dynamic Query Filter
+        const filter: Record<string, any> = { inventoryId };
+
+        if (action && typeof action === "string") {
+            const validActions = [
+                "RESTOCK",
+                "RESERVE",
+                "DISPATCH",
+                "CANCEL_RESERVATION",
+                "ADJUSTMENT"
+            ];
+            const upperAction = action.toUpperCase().trim();
+
+            if (!validActions.includes(upperAction)) {
+                return res.status(400).json({
+                    status: "failed",
+                    message: `Invalid action filter. Allowed values: ${validActions.join(", ")}`
+                });
+            }
+
+            filter.action = upperAction;
+        }
+
+        // 4. Pagination Settings
+        const pageNum = Math.max(1, parseInt(page as string, 10) || 1);
+        const limitNum = Math.max(1, Math.min(100, parseInt(limit as string, 10) || 20)); // Cap limit at 100
+        const skip = (pageNum - 1) * limitNum;
+
+        // 5. Query Audit Ledger with Populated Resource Metadata
+        const [ledgerEntries, totalCount] = await Promise.all([
+            InventoryLedger.find(filter)
+                .populate({
+                    path: "resourceId",
+                    select: "name category unit isPerishable"
+                })
+                .sort({ createdAt: -1 }) // Newest ledger entries first
+                .skip(skip)
+                .limit(limitNum)
+                .lean(),
+            InventoryLedger.countDocuments(filter)
+        ]);
+
+        return res.status(200).json({
+            status: "success",
+            message: `Retrieved ${ledgerEntries.length} ledger audit log(s) for inventory ${inventoryId}.`,
+            data: ledgerEntries,
+            pagination: {
+                totalItems: totalCount,
+                currentPage: pageNum,
+                totalPages: Math.ceil(totalCount / limitNum),
+                pageSize: limitNum
+            }
+        });
+    } catch (error) {
+        console.error("Error in getInventoryLedger:", error);
+        return res.status(500).json({
+            status: "failed",
+            message: "Internal server error while fetching inventory audit ledger."
         });
     }
 };

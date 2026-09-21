@@ -1,9 +1,9 @@
 import { Worker, Job } from "bullmq";
-import { redisConnectionOptions } from "../config/redis.ts";
-import { BULK_NGO_VERIFICATION_QUEUE, BULK_NGO_DELETION_QUEUE } from "../queues/ngo.queue.ts";
-import ngoModel from "../models/ngo.model.ts";
-import { safeRedis } from "../config/redis.ts";
-import { RedisKeys } from "../utils/redisKeys.ts";
+import { redisConnectionOptions } from "../config/redis";
+import { BULK_NGO_VERIFICATION_QUEUE, BULK_NGO_DELETION_QUEUE } from "../queues/ngo.queue";
+import ngoModel from "../models/ngo.model";
+import { safeRedis } from "../config/redis";
+import { RedisKeys } from "../utils/redisKeys";
 import axios from "axios";
 
 interface BulkVerificationPayload {

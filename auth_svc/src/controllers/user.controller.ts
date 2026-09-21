@@ -1,14 +1,14 @@
-import { userModel } from "../models/user.model.ts";
+import { userModel } from "../models/user.model";
 import jwt from "jsonwebtoken";
 import type { Request, Response } from "express";
 import bcrypt from "bcrypt";
 import crypto from "crypto";
-import { sendEmail } from "../utils/sendEmail.ts";
+import { sendEmail } from "../utils/sendEmail";
 import { OAuth2Client } from "google-auth-library";
 import { RedisKeys } from "../utils/redisKeys";
 import { safeRedis } from "../config/redis";
 import axios from "axios";
-import { bulkUserDeletionQueue } from "../queues/auth.queue.ts";
+import { bulkUserDeletionQueue } from "../queues/auth.queue";
 
 
 const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);

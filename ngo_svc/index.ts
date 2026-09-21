@@ -8,9 +8,9 @@ if (!(v8 as any).startupSnapshot) {
 import dotenv from "dotenv";
 dotenv.config({ path: "./.env" });
 
-import app from "./src/app.ts";
-import connectToDB from "./src/config/db.ts";
-import { connectRedis, redisClient } from "./src/config/redis.ts";
+import app from "./src/app";
+import connectToDB from "./src/config/db";
+import { connectRedis, redisClient } from "./src/config/redis";
 import mongoose from "mongoose";
 
 await connectToDB();
@@ -27,7 +27,7 @@ const gracefulShutdownAPI = async (signal: string) => {
     if (isShuttingDown) return;
     isShuttingDown = true;
 
-    console.log(`\n⚠️ [index.ts] Received ${signal}. Shutting down HTTP server...`);
+    console.log(`\n⚠️ [index] Received ${signal}. Shutting down HTTP server...`);
     
     // Set a force-exit safeguard timer (10s) in case active HTTP sockets refuse to close
     const forceExitTimer = setTimeout(() => {

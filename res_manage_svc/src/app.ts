@@ -1,8 +1,9 @@
 import express, { type Express, type Request, type Response } from "express";
 import cors from "cors";
 import helmet from "helmet";
-import resRouter from "./routes/resource.route.ts";
-import invenRouter from "./routes/inventory.route.ts";
+import resRouter from "./routes/resource.route";
+import invenRouter from "./routes/inventory.route";
+import reserveRouter from "./routes/reserve.routes";
 
 const app: Express = express();
 
@@ -20,5 +21,14 @@ app.get("/health", (req: Request, res: Response) => {
 
 app.use("/api/resources",resRouter);
 app.use("/api/inventory", invenRouter);
+app.use("/api/internal/inventory", reserveRouter);
+
+app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+    console.error("Unhandled Error in resource manage svc:", err);
+    res.status(500).json({
+        status: "failed",
+        message: "Internal server error."
+    });
+});
 
 export default app;

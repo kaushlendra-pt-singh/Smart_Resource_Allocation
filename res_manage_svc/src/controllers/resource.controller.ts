@@ -1,46 +1,14 @@
-/*
-3. Internal Inter-Service Controllers (reservation.controller.ts)
-Protected by x-interservice-token middleware. Called directly by allocation_svc (Python) during automated resource matching.
+import type { Request, Response } from "express";
+import mongoose from "mongoose";
+import { Inventory } from "../models/inventory.model";
+import { Resource } from "../models/resource.model";
+import { safeRedis } from "../config/redis";
+import { RedisKeys } from "../utils/redisKeys";
 
-reserveStockInternal
-
-Method / Route: POST /internal/inventory/reserve
-
-Role: Internal Service (allocation_svc)
-
-Description: Atomically checks if (totalQuantity - reservedQuantity) >= requestedQty and increments reservedQuantity. Creates a RESERVE ledger entry linked to referenceId (NGO Request ID).
-
-cancelReservationInternal
-
-Method / Route: POST /internal/inventory/cancel-reservation
-
-Role: Internal Service (allocation_svc)
-
-Description: Releases locked stock if an NGO request is canceled or times out. Decrements reservedQuantity and creates a CANCEL_RESERVATION ledger entry.
-
-4. Audit & Ledger Controllers (ledger.controller.ts)
-Provides tracking and historical auditing for compliance.
-
-getInventoryLedger
-
-Method / Route: GET /api/v1/inventory/ledger/:inventoryId
-
-Role: Admin
-
-Description: Retrieves the complete immutable audit trail (RESTOCK, RESERVE, DISPATCH, CANCEL) for a specific warehouse inventory record.
- */
 
 const ALLOWED_CATEGORIES = ["FOOD", "MEDICAL", "SHELTER", "CLOTHING", "WATER", "OTHER"];
 const ALLOWED_UNITS = ["KG", "LITERS", "BOXES", "UNITS", "PACKETS"];
 
-
-import type { Request, Response } from "express";
-import mongoose from "mongoose";
-import { Inventory } from "../models/inventory.model";
-import { InventoryLedger } from "../models/ledger.model";
-import { Resource } from "../models/resource.model";
-import { safeRedis } from "../config/redis";
-import { RedisKeys } from "../utils/redisKeys";
 
 export const createResource = async (req: Request, res: Response): Promise<Response> => {
     try {

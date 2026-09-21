@@ -1,5 +1,5 @@
-import { bulkNgoVerificationWorker, bulkNgoDeletionWorker } from "./src/workers/ngo.worker.ts";
-import { redisClient } from "./src/config/redis.ts";
+import { bulkNgoVerificationWorker, bulkNgoDeletionWorker } from "./src/workers/ngo.worker";
+import { redisClient } from "./src/config/redis";
 import mongoose from "mongoose";
 
 console.log("⚡ Background Worker Service started...");

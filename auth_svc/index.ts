@@ -6,9 +6,9 @@ if (!(v8 as any).startupSnapshot) {
 import dotenv from "dotenv";
 dotenv.config({ path: "./.env" });
 
-import app from "./src/app.ts";
-import connectToDB from "./src/config/db.ts";
-import { connectRedis, redisClient } from "./src/config/redis.ts";
+import app from "./src/app";
+import connectToDB from "./src/config/db";
+import { connectRedis, redisClient } from "./src/config/redis";
 import mongoose from "mongoose";
 
 await connectToDB();

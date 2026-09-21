@@ -1,9 +1,9 @@
 import { Worker, Job } from "bullmq";
-import { redisConnectionOptions } from "../config/redis.ts";
-import { BULK_USER_DELETION_QUEUE } from "../queues/auth.queue.ts";
-import { userModel } from "../models/user.model.ts";
-import { safeRedis } from "../config/redis.ts";
-import { RedisKeys } from "../utils/redisKeys.ts";
+import { redisConnectionOptions } from "../config/redis";
+import { BULK_USER_DELETION_QUEUE } from "../queues/auth.queue";
+import { userModel } from "../models/user.model";
+import { safeRedis } from "../config/redis";
+import { RedisKeys } from "../utils/redisKeys";
 import axios from "axios";
 
 interface BulkUserDeletionPayload {

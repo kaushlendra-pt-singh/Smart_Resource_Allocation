@@ -1,5 +1,5 @@
 import { Queue } from "bullmq";
-import { redisConnectionOptions } from "../config/redis.ts";
+import { redisConnectionOptions } from "../config/redis";
 
 export const BULK_USER_DELETION_QUEUE = "bulk-user-deletion-queue";
 
