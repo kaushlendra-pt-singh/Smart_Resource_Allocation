@@ -292,7 +292,7 @@ export const dispatchInventory = async (req: Request, res: Response): Promise<Re
             });
         }
 
-        // 2. Fetch inventory record inside session
+        // 2. Fetch inventory record inside Mongoose session
         const inventory = await Inventory.findById(inventoryId).session(session);
 
         if (!inventory) {
@@ -307,36 +307,39 @@ export const dispatchInventory = async (req: Request, res: Response): Promise<Re
         const isOwnerNgo = inventory.ngoId === requestingNgoId;
         const availableQty = Math.max(0, inventory.totalQuantity - inventory.reservedQuantity);
 
-        // 3. Enforce NGO Tier-Based Allocation Guard
         let dispatchAmount = 0;
         let decrementReserved = 0;
 
+        // 3. Strict Unreserved-First Allocation Guard
         if (availableQty >= quantity) {
-            // Case A: Unreserved stock is sufficient -> Any NGO can take the full requested amount
+            // CASE 1: Unreserved stock is enough -> ANY NGO (owner or non-owner) takes from unreserved stock!
             dispatchAmount = quantity;
-            decrementReserved = 0; // Outgoing stock came from unreserved pool
+            decrementReserved = 0; // Reserved stock is untouched
         } else if (isOwnerNgo) {
-            // Case B: Requesting NGO OWNS this inventory -> Can dip into reserved stock!
-            if (inventory.totalQuantity < quantity) {
+            // CASE 2: Requested quantity exceeds unreserved stock AND requester is OWNER NGO
+            // Cap dispatch to total physical stock available in warehouse
+            dispatchAmount = Math.min(quantity, inventory.totalQuantity);
+
+            if (dispatchAmount === 0) {
                 await session.abortTransaction();
                 session.endSession();
                 return res.status(400).json({
                     status: "failed",
-                    message: `Insufficient overall stock. Total available in warehouse is ${inventory.totalQuantity}, requested ${quantity}.`
+                    message: "Warehouse is completely out of stock."
                 });
             }
-            dispatchAmount = quantity;
-            // Deduct from reserved pool for any amount beyond availableQty
-            decrementReserved = quantity - availableQty;
+
+            // Consume all remaining unreserved stock first, then take the deficit from reserved
+            decrementReserved = dispatchAmount - availableQty;
         } else {
             // Case C: Outside NGO and requestedQty > availableQty -> Cap dispatch to availableQty only!
             if (availableQty === 0) {
-                await session.abortTransaction();
-                session.endSession();
-                return res.status(403).json({
-                    status: "failed",
+            await session.abortTransaction();
+            session.endSession();
+            return res.status(403).json({
+                status: "failed",
                     message: `Access denied. Unreserved stock is 0. The remaining ${inventory.reservedQuantity} reserved units belong exclusively to NGO "${inventory.ngoId}".`
-                });
+            });
             }
             // Cap dispatch amount to availableQty
             dispatchAmount = availableQty;
@@ -356,7 +359,7 @@ export const dispatchInventory = async (req: Request, res: Response): Promise<Re
                     reservedQuantity: -decrementReserved
                 }
             },
-            { new: true, session, runValidators: true }
+            { returnDocument: "after", session, runValidators: true }
         );
 
         if (!updatedInventory) {
@@ -379,7 +382,7 @@ export const dispatchInventory = async (req: Request, res: Response): Promise<Re
                     performedBy: performedBy.trim(),
                     notes: notes
                         ? notes.trim()
-                        : `Dispatched ${dispatchAmount} units to NGO ${requestingNgoId} from warehouse ${updatedInventory.warehouseName}`
+                        : `Dispatched ${dispatchAmount} units (${decrementReserved} drawn from reserved) to NGO ${requestingNgoId} from warehouse ${updatedInventory.warehouseName}`
                 }
             ],
             { session }
@@ -389,7 +392,7 @@ export const dispatchInventory = async (req: Request, res: Response): Promise<Re
         await session.commitTransaction();
         session.endSession();
 
-        // 7. Update Redis Caches
+        // 7. Synchronize Redis Caches
         const inventoryIdStr = updatedInventory._id.toString();
         const resourceIdStr = updatedInventory.resourceId.toString();
         const newAvailableQty = Math.max(0, updatedInventory.totalQuantity - updatedInventory.reservedQuantity);
@@ -411,13 +414,12 @@ export const dispatchInventory = async (req: Request, res: Response): Promise<Re
 
         return res.status(200).json({
             status: "success",
-            message: dispatchAmount < quantity
-                ? `Partial dispatch fulfilled. Allocated maximum available unreserved stock of ${dispatchAmount} units (requested ${quantity}).`
-                : `Successfully dispatched ${dispatchAmount} units.`,
+            message: `Successfully dispatched ${dispatchAmount} units.`,
             data: {
                 inventoryId: updatedInventory._id,
                 warehouseName: updatedInventory.warehouseName,
                 dispatchedQuantity: dispatchAmount,
+                clearedReservedQuantity: decrementReserved,
                 totalQuantity: updatedInventory.totalQuantity,
                 reservedQuantity: updatedInventory.reservedQuantity,
                 availableQuantity: newAvailableQty
