@@ -310,7 +310,7 @@ export const addMemberController = async (req: Request, res: Response): Promise<
             return res.status(400).json({ status: "failed", message: "ngoId, targetUserId, and roleInNGO are required." });
         }
 
-        const allowedRoles = ["NGO_ADMIN", "GROUND_WORKER", "VOLUNTEER"];
+        const allowedRoles = ["NGO_ADMIN", "NGO_WORKER", "VOLUNTEER"];
         if (!allowedRoles.includes(roleInNGO)) {
             return res.status(400).json({
                 status: "failed",

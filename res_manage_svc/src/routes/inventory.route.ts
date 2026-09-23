@@ -24,7 +24,7 @@ invenRouter.post(
     "/dispatch",
     rateLimiter,
     authMiddleWare,
-    requireRoles(["SUPER_ADMIN", "NGO_ADMIN"]),
+    requireRoles(["SUPER_ADMIN", "NGO_ADMIN", "NGO_WORKER", "VOLUNTEER"]),
     dispatchInventory
 );
 

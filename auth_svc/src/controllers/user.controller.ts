@@ -944,11 +944,11 @@ const transferFounderRoleInternalController = async (req: Request, res: Response
 
             // If not a Super Admin and manages no other NGOs, demote global role
             if (previousAdmin.role !== "SUPER_ADMIN" && !hasOtherAdminRoles) {
-                // Find remaining role in this NGO or fallback to GROUND_WORKER
+                // Find remaining role in this NGO or fallback to NGO_WORKER
                 const currentNgoMembership = previousAdmin.joinedNGOs.find(
                     (item) => item.ngoId.toString() === ngoId.toString()
                 );
-                previousAdmin.role = currentNgoMembership?.roleInNGO || "GROUND_WORKER";
+                previousAdmin.role = currentNgoMembership?.roleInNGO || "NGO_WORKER";
             }
 
             await previousAdmin.save();
@@ -995,8 +995,8 @@ const removeNgoFromUserListInternalController = async (req: Request, res: Respon
             );
 
             if (!isStillAdminElsewhere) {
-                // Set to GROUND_WORKER or USER depending on remaining memberships
-                user.role = user.joinedNGOs.length > 0 ? "GROUND_WORKER" : "RESIDENT";
+                // Set to NGO_WORKER or USER depending on remaining memberships
+                user.role = user.joinedNGOs.length > 0 ? "NGO_WORKER" : "RESIDENT";
             }
         }
 
@@ -1041,7 +1041,7 @@ const cleanupDeletedNgoInternalController = async (req: Request, res: Response):
                 if (isStillAdminElsewhere) {
                     user.role = "NGO_ADMIN";
                 } else if (user.joinedNGOs.length > 0) {
-                    user.role = "GROUND_WORKER";
+                    user.role = "NGO_WORKER";
                 } else {
                     user.role = "RESIDENT";
                 }

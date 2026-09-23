@@ -3,12 +3,12 @@ import bcrypt from "bcrypt";
 import jwt from "jsonwebtoken";
 
 // Define the available roles in the system
-export type UserRole = 'SUPER_ADMIN' | 'NGO_ADMIN' | 'GROUND_WORKER' | 'RESIDENT' | 'VOLUNTEER';
+export type UserRole = 'SUPER_ADMIN' | 'NGO_ADMIN' | 'NGO_WORKER' | 'RESIDENT' | 'VOLUNTEER';
 export type verificationTypes = 'NONE' | 'PENDING' | 'APPROVED' | 'REJECTED';
 
 export interface IJoinedNGO {
   ngoId: mongoose.Types.ObjectId;
-  roleInNGO: 'NGO_ADMIN' | 'GROUND_WORKER' | 'VOLUNTEER';
+  roleInNGO: 'NGO_ADMIN' | 'NGO_WORKER' | 'VOLUNTEER';
 }
 
 // TS Interface representing the User Document
@@ -44,7 +44,7 @@ const UserSchema: Schema = new Schema<IUser>(
     profilePic: { type: String, default: "https://cdn-icons-png.flaticon.com/512/149/149071.png", trim: true },
     role: {
       type: String,
-      enum: ['SUPER_ADMIN', 'NGO_ADMIN', 'GROUND_WORKER', 'RESIDENT', 'VOLUNTEER'],
+      enum: ['SUPER_ADMIN', 'NGO_ADMIN', 'NGO_WORKER', 'RESIDENT', 'VOLUNTEER'],
       required: true,
       default: 'RESIDENT'
     },
@@ -54,7 +54,7 @@ const UserSchema: Schema = new Schema<IUser>(
         ngoId: { type: Schema.Types.ObjectId, ref: 'NGO', required: true },
         roleInNGO: {
           type: String,
-          enum: ['NGO_ADMIN', 'GROUND_WORKER', 'VOLUNTEER'],
+          enum: ['NGO_ADMIN', 'NGO_WORKER', 'VOLUNTEER'],
           required: true
         }
       }
