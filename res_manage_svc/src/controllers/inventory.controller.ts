@@ -304,7 +304,7 @@ export const dispatchInventory = async (req: Request, res: Response): Promise<Re
             });
         }
 
-        const isOwnerNgo = inventory.ngoId === requestingNgoId;
+        const isOwnerNgo = inventory.ngoId === requestingNgoId || req.user?.role === "SUPER_ADMIN";
         const availableQty = Math.max(0, inventory.totalQuantity - inventory.reservedQuantity);
 
         let dispatchAmount = 0;

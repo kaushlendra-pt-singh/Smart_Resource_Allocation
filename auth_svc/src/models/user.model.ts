@@ -94,6 +94,7 @@ UserSchema.methods.comparePassword = async function (password: string) {
 UserSchema.methods.generateAccessToken = function (this: IUser): string {
   return jwt.sign(
     {
+      ngoId: this.ngoId ?? "",
       _id: this._id.toString(),
       email: this.email,
       role: this.role
