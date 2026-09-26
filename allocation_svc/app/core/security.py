@@ -68,6 +68,8 @@ async def verify_jwt_token(
             algorithms=["HS256"],
         )
 
+        logger.info(f"[allocation] payload = {payload}")
+
         return payload
 
     except ExpiredSignatureError:

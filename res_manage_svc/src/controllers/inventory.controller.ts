@@ -42,7 +42,7 @@ export const restockInventory = async (req: Request, res: Response): Promise<Res
         }
 
         // Verify resource existence
-        const resourceExists = await Resource.findById({ ngoId, resourceId }).session(session);
+        const resourceExists = await Resource.findById(resourceId).session(session);
         if (!resourceExists) {
             await session.abortTransaction();
             session.endSession();
@@ -52,9 +52,16 @@ export const restockInventory = async (req: Request, res: Response): Promise<Res
             });
         }
 
-        if (!resourceExists && (!coordinates || !isValidCoordinates(coordinates))) {
+        const existingInventory = await Inventory.findOne({
+            ngoId,
+            resourceId,
+            warehouseName: warehouseName.trim()
+        }).session(session);
+
+        if (!existingInventory && (!coordinates || !isValidCoordinates(coordinates))) {
             await session.abortTransaction();
             session.endSession();
+
             return res.status(400).json({
                 status: "failed",
                 message: "Geospatial coordinates [longitude, latitude] are required when creating a new warehouse inventory record."
@@ -80,7 +87,7 @@ export const restockInventory = async (req: Request, res: Response): Promise<Res
                 }
             },
             {
-                new: true,
+                returnDocument: "after",
                 upsert: true,
                 session,
                 runValidators: true
@@ -334,12 +341,12 @@ export const dispatchInventory = async (req: Request, res: Response): Promise<Re
         } else {
             // Case C: Outside NGO and requestedQty > availableQty -> Cap dispatch to availableQty only!
             if (availableQty === 0) {
-            await session.abortTransaction();
-            session.endSession();
-            return res.status(403).json({
-                status: "failed",
+                await session.abortTransaction();
+                session.endSession();
+                return res.status(403).json({
+                    status: "failed",
                     message: `Access denied. Unreserved stock is 0. The remaining ${inventory.reservedQuantity} reserved units belong exclusively to NGO "${inventory.ngoId}".`
-            });
+                });
             }
             // Cap dispatch amount to availableQty
             dispatchAmount = availableQty;

@@ -85,7 +85,7 @@ export const reserveStockInternal = async (req: Request, res: Response): Promise
                 $inc: { reservedQuantity: quantity }
             },
             {
-                new: true,
+                returnDocument: "after",
                 session,
                 runValidators: true
             }
@@ -237,7 +237,7 @@ export const cancelReservationInternal = async (req: Request, res: Response): Pr
                 $inc: { reservedQuantity: -quantity }
             },
             {
-                new: true,
+                returnDocument: "after",
                 session,
                 runValidators: true
             }

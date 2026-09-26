@@ -1,5 +1,6 @@
 import json
 import logging
+from bson import ObjectId
 from typing import List, Dict, Any, Optional
 import numpy as np
 from scipy.optimize import linprog
@@ -137,20 +138,28 @@ async def fetch_candidate_warehouses(
     logger.info("[optimizer] Fetching inventory candidates directly from MongoDB...")
     query: dict = {"resourceId": resource_id, "totalQuantity": {"$gt": 0}}
 
-    if target_location:
-        query["location"] = {
-            "$near": {
-                "$geometry": {"type": "Point", "coordinates": target_location},
-                "$maxDistance": radius_km * 1000,  # Convert km to meters
-            }
-        }
+    if not ObjectId.is_valid(resource_id):
+        logger.error(f"[optimizer] Invalid resource ID: {resource_id}")
+        return []
+
+    query["resourceId"] = ObjectId(resource_id)
+    # if target_location:
+    #     query["location.coordinates"] = {
+    #         "$near": {
+    #             "$geometry": {"type": "Point", "coordinates": target_location},
+    #             "$maxDistance": radius_km * 1000,  # Convert km to meters
+    #         }
+    #     }
 
     if mongo_db.db is None:
         logger.error("[db] MongoDB connection is not initialized.")
         return []
 
-    cursor = mongo_db.db["inventory"].find(query)
+    cursor = mongo_db.db["inventories"].find(query)
     mongo_docs = await cursor.to_list(length=100)
+    
+    logger.info(f"mongo query: {query}")
+    logger.info(f"mongo docs: {mongo_docs}")
 
     for doc in mongo_docs:
         total_q = int(doc.get("totalQuantity", 0))

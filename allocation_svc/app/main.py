@@ -58,7 +58,7 @@ async def root_health():
     return await health_check()
 
 # Mount all API V1 routes cleanly through api_v1_router
-app.include_router(api_v1_router, prefix="/api")
+app.include_router(api_v1_router, prefix="/allocation/api")
 
 
 if __name__ == "__main__":
