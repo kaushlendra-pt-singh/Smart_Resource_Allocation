@@ -143,13 +143,13 @@ async def fetch_candidate_warehouses(
         return []
 
     query["resourceId"] = ObjectId(resource_id)
-    # if target_location:
-    #     query["location.coordinates"] = {
-    #         "$near": {
-    #             "$geometry": {"type": "Point", "coordinates": target_location},
-    #             "$maxDistance": radius_km * 1000,  # Convert km to meters
-    #         }
-    #     }
+    if target_location:
+        query["location.coordinates"] = {
+            "$near": {
+                "$geometry": {"type": "Point", "coordinates": target_location},
+                "$maxDistance": radius_km * 1000,  # Convert km to meters
+            }
+        }
 
     if mongo_db.db is None:
         logger.error("[db] MongoDB connection is not initialized.")
@@ -157,9 +157,6 @@ async def fetch_candidate_warehouses(
 
     cursor = mongo_db.db["inventories"].find(query)
     mongo_docs = await cursor.to_list(length=100)
-    
-    logger.info(f"mongo query: {query}")
-    logger.info(f"mongo docs: {mongo_docs}")
 
     for doc in mongo_docs:
         total_q = int(doc.get("totalQuantity", 0))

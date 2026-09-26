@@ -28,7 +28,6 @@ async def allocate_resources(
     request: AllocationRequest,
     current_user: Dict[str, Any] = Depends(require_ngo_worker)
 ):
-    logger.info(f"[allocation] current_user = {current_user}")
     user_id = current_user.get("_id") or current_user.get("userId")
     # Default to token's ngoId if requesterNgoId is omitted in request body
     requester_ngo_id = current_user.get("ngoId", "")
@@ -48,16 +47,6 @@ async def allocate_resources(
             radius_km=request.maxSearchRadiusKm,
             user_role=current_user.get("role", "USER")
         )
-
-        logger.info(
-            f"[allocation] Found {len(candidates)} candidates "
-            f"for resource={item.resourceId}"
-        )
-
-        for candidate in candidates:
-            logger.info(
-                f"A candidate is: {candidate}"
-            )
 
         # 2. Run spatial optimizer
         opt_result = optimizer.solve_single_resource_allocation(
