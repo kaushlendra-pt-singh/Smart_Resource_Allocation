@@ -7,7 +7,8 @@ import { userModel } from "../models/user.model";
 interface AccessTokenPayload {
     _id: string;
     email: string;
-    role: string;
+    role?: string;
+    ngoId?: string;
 }
 
 export default async function authMiddleware(req: Request, res: Response, next: NextFunction) {
@@ -47,7 +48,7 @@ export default async function authMiddleware(req: Request, res: Response, next: 
             _id: user._id.toString(),
             email: user.email,
             role: user.role,
-            joinedNGOs: user.joinedNGOs || []
+            ngoId: user.ngoId?.toString()
         };
 
         // Re-prime profile cache in Redis (24 Hour TTL)

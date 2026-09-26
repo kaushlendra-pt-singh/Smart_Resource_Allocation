@@ -8,6 +8,7 @@ declare global {
         _id: string;
         role?: string;
         email: string;
+        ngoId?: string;
       };
     }
   }

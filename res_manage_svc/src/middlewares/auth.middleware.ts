@@ -11,13 +11,15 @@ export async function authMiddleWare(req: Request, res: Response, next: NextFunc
             _id: string;
             role: string;
             email: string;
+            ngoId: string;
         };
 
         // 2. Map the array to the req.user object
         req.user = {
             _id: decoded._id, // Aligned with the JWT payload
             role: decoded.role,
-            email: decoded.email
+            email: decoded.email,
+            ngoId: decoded.ngoId
         };
 
         next();
