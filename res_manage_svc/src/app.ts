@@ -19,6 +19,10 @@ app.get("/health", (req: Request, res: Response) => {
     res.status(200).json({ service: "res_manage_svc", status: "UP", timestamp: new Date() });
 });
 
+app.get("/api/resources/health", (req: Request, res: Response) => {
+    res.status(200).json({ service: "res_manage_svc", status: "UP", timestamp: new Date() });
+});
+
 app.use("/api/resources",resRouter);
 app.use("/api/inventory", invenRouter);
 app.use("/api/internal/inventory", reserveRouter);

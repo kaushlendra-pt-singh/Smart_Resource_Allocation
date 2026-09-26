@@ -2,18 +2,22 @@ import express from "express";
 import cors from "cors";
 import cookieParser from "cookie-parser";
 import ngoRouter from "./routes/ngo.routes";
+import type { Request, Response } from "express";
 
 const app = express();
 app.use(express.json());
 app.use(cors());
 app.use(cookieParser());
 
-app.get("/",(req, res)=>{
-    return res.status(200).json({"message":"All good at ngo_svc server.", "status":"success"});
+app.get("/", (req: Request, res: Response) => {
+    res.status(200).json({ service: "res_manage_svc", status: "UP", timestamp: new Date() });
+});
+app.get("/health", (req: Request, res: Response) => {
+    res.status(200).json({ service: "res_manage_svc", status: "UP", timestamp: new Date() });
 });
 
-app.get("/api/ngo/health",(req, res)=>{
-    return res.status(200).json({"message":"NGO Management Service is healthy", "status":"success"});
+app.get("/api/ngo/health", (req: Request, res: Response) => {
+    res.status(200).json({ service: "res_manage_svc", status: "UP", timestamp: new Date() });
 });
 
 app.use("/api/ngo", ngoRouter);

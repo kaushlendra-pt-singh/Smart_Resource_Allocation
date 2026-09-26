@@ -1,4 +1,5 @@
 import logging
+from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -48,7 +49,8 @@ app.add_middleware(
 def root():
     return {
         "status": "Allocation Service up.",
-        "message": "Server is running."
+        "message": "Server is running.",
+        "time_stamp": datetime.now(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00', 'Z')
     }
 
 @app.get("/health", tags=["Health"])

@@ -2,6 +2,7 @@ import express from "express";
 import cookieParser from "cookie-parser";
 import cors from "cors";
 import authRoutes from "./routes/auth.routes";
+import type { Request, Response } from "express";
 
 const app = express();
 
@@ -11,13 +12,15 @@ app.use(cors({
 }));
 app.use(cookieParser());
 
-app.get("/",(req, res)=>{
-    return res.status(200).json({"message":"All good at auth_svc server."});
-})
+app.get("/", (req: Request, res: Response) => {
+    res.status(200).json({ service: "res_manage_svc", status: "UP", timestamp: new Date() });
+});
+app.get("/health", (req: Request, res: Response) => {
+    res.status(200).json({ service: "res_manage_svc", status: "UP", timestamp: new Date() });
+});
 
-
-app.get("/api/auth/health",(req, res)=>{
-    return res.status(200).json({"message":"Server is healthy"});
+app.get("/api/auth/health", (req: Request, res: Response) => {
+    res.status(200).json({ service: "res_manage_svc", status: "UP", timestamp: new Date() });
 });
 
 app.use("/api/auth", authRoutes);
