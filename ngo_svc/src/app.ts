@@ -10,14 +10,14 @@ app.use(cors());
 app.use(cookieParser());
 
 app.get("/", (req: Request, res: Response) => {
-    res.status(200).json({ service: "res_manage_svc", status: "UP", timestamp: new Date() });
+    res.status(200).json({ service: "ngo_svc", status: "UP", timestamp: new Date() });
 });
 app.get("/health", (req: Request, res: Response) => {
-    res.status(200).json({ service: "res_manage_svc", status: "UP", timestamp: new Date() });
+    res.status(200).json({ service: "ngo_svc", status: "UP", timestamp: new Date() });
 });
 
 app.get("/api/ngo/health", (req: Request, res: Response) => {
-    res.status(200).json({ service: "res_manage_svc", status: "UP", timestamp: new Date() });
+    res.status(200).json({ service: "ngo_svc", status: "UP", timestamp: new Date() });
 });
 
 app.use("/api/ngo", ngoRouter);

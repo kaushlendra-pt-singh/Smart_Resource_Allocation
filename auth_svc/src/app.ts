@@ -13,14 +13,14 @@ app.use(cors({
 app.use(cookieParser());
 
 app.get("/", (req: Request, res: Response) => {
-    res.status(200).json({ service: "res_manage_svc", status: "UP", timestamp: new Date() });
+    res.status(200).json({ service: "auth_svc", status: "UP", timestamp: new Date() });
 });
 app.get("/health", (req: Request, res: Response) => {
-    res.status(200).json({ service: "res_manage_svc", status: "UP", timestamp: new Date() });
+    res.status(200).json({ service: "auth_svc", status: "UP", timestamp: new Date() });
 });
 
 app.get("/api/auth/health", (req: Request, res: Response) => {
-    res.status(200).json({ service: "res_manage_svc", status: "UP", timestamp: new Date() });
+    res.status(200).json({ service: "auth_svc", status: "UP", timestamp: new Date() });
 });
 
 app.use("/api/auth", authRoutes);
