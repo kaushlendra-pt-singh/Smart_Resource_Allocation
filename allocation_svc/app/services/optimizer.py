@@ -263,6 +263,60 @@ class SpatialOptimizer:
                 allocations=[],
             )
 
+        # If partial fulfillment is not allowed, one warehouse
+        # must be capable of fulfilling the entire request.
+        if not allow_partial_fulfillment:
+            full_stock_candidates = [
+                item
+                for item in usable_candidates
+                if item["usable_qty"] >= requested_quantity
+            ]
+
+            if not full_stock_candidates:
+                return OptimizationResult(
+                    resource_id=resource_id,
+                    requested_quantity=requested_quantity,
+                    total_allocated=0,
+                    is_fully_allocated=False,
+                    allocations=[],
+                )
+
+            # Prefer the preferred warehouse if one can fulfill everything.
+            if preferred_warehouse_name:
+                preferred_full = [
+                    item
+                    for item in full_stock_candidates
+                    if item["is_preferred"]
+                ]
+                if preferred_full:
+                    full_stock_candidates = preferred_full
+
+            # Otherwise choose the nearest capable warehouse.
+            full_stock_candidates.sort(key=lambda x: x["distance_km"])
+            item = full_stock_candidates[0]
+
+            c: WarehouseCandidate = item["candidate"]
+
+            allocations = [
+                {
+                    "inventoryId": c.inventory_id,
+                    "warehouseName": c.warehouse_name,
+                    "ngoId": c.ngo_id,
+                    "isOwnNgoWarehouse": (c.ngo_id == requesting_ngo_id),
+                    "allocatedQuantity": requested_quantity,
+                    "distanceKm": item["distance_km"],
+                    "warehouseCoordinates": c.coordinates,
+                }
+            ]
+
+            return OptimizationResult(
+                resource_id=resource_id,
+                requested_quantity=requested_quantity,
+                total_allocated=requested_quantity,
+                is_fully_allocated=True,
+                allocations=allocations,
+            )
+
         allocations: List[Dict[str, Any]] = []
         remaining_needed = requested_quantity
 
@@ -315,14 +369,6 @@ class SpatialOptimizer:
             )
 
             total_available = int(np.sum(c_capacities))
-            if total_available < requested_quantity and not allow_partial_fulfillment:
-                return OptimizationResult(
-                    resource_id=resource_id,
-                    requested_quantity=requested_quantity,
-                    total_allocated=0,
-                    is_fully_allocated=False,
-                    allocations=[],
-                )
             target_alloc = min(remaining_needed, total_available)
 
             # Linear Program formulation using HiGHS solver
