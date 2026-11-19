@@ -21,6 +21,13 @@ export const createResource = async (req: Request, res: Response): Promise<Respo
             });
         }
 
+        if (perishable !== undefined && typeof perishable !== "boolean") {
+            return res.status(400).json({
+                message: "perishable must be a boolean when provided.",
+                status: "failed"
+            });
+        }
+
         const normalizedCategory = category.trim().toUpperCase();
         const normalizedUnit = unit.trim().toUpperCase();
 
@@ -56,11 +63,11 @@ export const createResource = async (req: Request, res: Response): Promise<Respo
             name: normalizedName,
             category: normalizedCategory,
             unit: normalizedUnit,
-            description: desc ? desc.trim() : "No description given",
+            description: desc ? String(desc).trim() : "No description given",
             isPerishable: perishable ?? false
         });
 
-        // Set in Redis
+        // resource is properly typed again, so resource.toObject() works cleanly
         await safeRedis.set(
             RedisKeys.resourceDetails(resource._id.toString()),
             JSON.stringify(resource.toObject()),
@@ -180,12 +187,18 @@ export const getResourceById = async (req: Request, res: Response): Promise<Resp
         // 3. Compute global aggregate stock totals across all warehouses
         const stockSummary = inventories.reduce(
             (acc, inv) => {
-                acc.totalQuantity += inv.totalQuantity || 0;
-                acc.reservedQuantity += inv.reservedQuantity || 0;
-                acc.availableQuantity += inv.availableQuantity || 0;
+                const total = inv.totalQuantity || 0;
+                const reserved = inv.reservedQuantity || 0;   // owner-protected cap
+                const allocated = inv.allocatedQuantity || 0; // active holds
+                acc.totalQuantity += total;
+                acc.reservedQuantity += reserved;
+                acc.allocatedQuantity += allocated;
+                // stock other NGOs can use / stock the owner tier can use (computed, not from virtuals)
+                acc.availableQuantity += Math.max(0, total - allocated - reserved);
+                acc.ownerAvailableQuantity += Math.max(0, total - allocated);
                 return acc;
             },
-            { totalQuantity: 0, reservedQuantity: 0, availableQuantity: 0 }
+            { totalQuantity: 0, reservedQuantity: 0, allocatedQuantity: 0, availableQuantity: 0, ownerAvailableQuantity: 0 }
         );
 
         return res.status(200).json({
@@ -194,7 +207,11 @@ export const getResourceById = async (req: Request, res: Response): Promise<Resp
             data: {
                 resource: resourceData,
                 stockSummary,
-                warehouses: inventories
+                warehouses: inventories.map((inv) => ({
+                    ...inv,
+                    availableQuantity: Math.max(0, (inv.totalQuantity || 0) - (inv.allocatedQuantity || 0) - (inv.reservedQuantity || 0)),
+                    ownerAvailableQuantity: Math.max(0, (inv.totalQuantity || 0) - (inv.allocatedQuantity || 0))
+                }))
             }
         });
     } catch (error) {

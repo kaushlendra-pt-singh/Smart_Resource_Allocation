@@ -5,11 +5,21 @@ from app.core.config import settings
 
 logger = logging.getLogger(settings.APP_NAME)
 
+_FAILURE_STATUSES = {"failed", "fail", "error", "false"}
+
 
 class ResServiceClient:
     """
     Async HTTP Client for inter-service communication with res_manage_svc.
     Uses x-internal-key authentication header to call internal endpoints.
+
+    Every method returns a NORMALIZED dict:
+      success -> {"status": "success", ...body of res_manage_svc...}
+      failure -> {"status": "failed", "statusCode"?, "message", "data"?, "ambiguous": bool}
+
+    "ambiguous" = True means the request may have been processed by
+    res_manage_svc even though we did not get a clean answer (read timeout,
+    connection dropped, 5xx). Callers must then make sure nothing is left held.
     """
 
     def __init__(self):
@@ -21,116 +31,145 @@ class ResServiceClient:
         # Timeout settings: 5s connection, 10s read
         self.timeout = httpx.Timeout(10.0, connect=5.0)
 
-    async def reserve_stock(
-        self, inventory_id: str, reference_id: str, quantity: int, reason: Optional[str] = None
+    @staticmethod
+    def _body_signals_success(body: Any) -> bool:
+        """A 2xx is a success unless the body explicitly says otherwise."""
+        if not isinstance(body, dict):
+            return True
+        if body.get("success") is False:
+            return False
+        status_val = body.get("status")
+        if isinstance(status_val, str) and status_val.lower() in _FAILURE_STATUSES:
+            return False
+        return True
+
+    async def _post(
+        self, path: str, payload: Dict[str, Any], action: str, default_error: str
     ) -> Dict[str, Any]:
-        """
-        Calls res_manage_svc's internal reserve endpoint to hold stock.
-
-        POST /api/internal/inventory
-        Payload: { inventoryId, quantity, reason }
-        """
-        url = f"{self.base_url}/api/internal/inventory/reserve"
-        payload = {
-            "inventoryId": inventory_id,
-            "referenceId": reference_id,
-            "quantity": quantity,
-            "notes": reason or "Automated disaster allocation hold by allocation_svc",
-        }
-
-        async with httpx.AsyncClient(
-            headers=self.headers, timeout=self.timeout
-        ) as client:
-            try:
-                data = None
+        url = f"{self.base_url}{path}"
+        try:
+            async with httpx.AsyncClient(
+                headers=self.headers, timeout=self.timeout
+            ) as client:
                 response = await client.post(url, json=payload)
 
-                if response.status_code < 400:
-                    return response.json()
+        except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout) as exc:
+            # Request never reached res_manage_svc -> definitely not processed.
+            logger.error(f"[res_client] {action}: cannot connect: {exc!r}")
+            return {
+                "status": "failed",
+                "message": f"Unable to reach res_manage_svc: {exc!r}",
+                "ambiguous": False,
+            }
+        except httpx.RequestError as exc:
+            # Read/write timeout, dropped connection, etc. -> outcome unknown.
+            logger.error(
+                f"[res_client] {action}: request error (outcome unknown): {exc!r}"
+            )
+            return {
+                "status": "failed",
+                "message": f"No clean response from res_manage_svc: {exc!r}",
+                "ambiguous": True,
+            }
 
-                try:
-                    data = response.json()
-                    err_message = data.get(
-                        "message",
-                        "Failed to reserve stock in res_manage_svc."
-                    )
-                except Exception as e:
-                    logger.error(f"Error in destructuring response in res_client: {e}")
-                    err_message = response.text or "Failed to reserve stock in res_manage_svc."
+        try:
+            body = response.json()
+        except ValueError:
+            body = None
 
-                logger.error(
-                    f"[res_client] Reserve failed. Status: {response.status_code}, Response: {response}"
-                )
-                return {
-                    "status": "failed",
-                    "statusCode": response.status_code,
-                    "message": err_message,
-                    "data": data
-                }
-            except httpx.RequestError as exc:
-                logger.error(
-                    f"[res_client] HTTP Request Exception while calling reserve: {exc}"
-                )
-                return {
-                    "status": "failed",
-                    "message": f"Unable to reach res_manage_svc: {str(exc)}",
-                }
+        if 200 <= response.status_code < 300 and self._body_signals_success(body):
+            result: Dict[str, Any] = (
+                dict(body) if isinstance(body, dict) else {"data": body}
+            )
+            result["status"] = "success"  # normalize regardless of upstream shape
+            return result
+
+        message = (
+            (body.get("message") if isinstance(body, dict) else None)
+            or response.text
+            or default_error
+        )
+        logger.error(
+            f"[res_client] {action} failed. Status: {response.status_code}, Body: {response.text}"
+        )
+        return {
+            "status": "failed",
+            "statusCode": response.status_code,
+            "message": message,
+            "data": body,
+            # 5xx: the server may have applied the change before erroring.
+            "ambiguous": response.status_code >= 500,
+        }
+
+    async def reserve_stock(
+        self,
+        inventory_id: str,
+        reference_id: str,
+        quantity: int,
+        reason: Optional[str] = None,
+        include_owner_reserve: bool = False,
+        performed_by: Optional[str] = "allocation_svc",
+    ) -> Dict[str, Any]:
+        """POST /api/internal/inventory/reserve"""
+        return await self._post(
+            "/api/internal/inventory/reserve",
+            {
+                "inventoryId": inventory_id,
+                "referenceId": reference_id,
+                "quantity": quantity,
+                "performedBy": performed_by,
+                "includeOwnerReserve": include_owner_reserve,
+                "notes": reason
+                or "Automated disaster allocation hold by allocation_svc",
+            },
+            action="reserve",
+            default_error="Failed to reserve stock in res_manage_svc.",
+        )
 
     async def cancel_reservation(
-        self, inventory_id: str, reference_id: str, quantity: int, reason: Optional[str] = None
+        self,
+        inventory_id: str,
+        reference_id: str,
+        quantity: int,
+        performed_by: Optional[str] = "allocation_svc",
+        reason: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """
-        Calls res_manage_svc's internal cancel reservation endpoint to release a hold.
+        """POST /api/internal/inventory/cancel-reservation"""
+        return await self._post(
+            "/api/internal/inventory/cancel-reservation",
+            {
+                "inventoryId": inventory_id,
+                "referenceId": reference_id,
+                "quantity": quantity,
+                "performedBy": performed_by,
+                "notes": reason
+                or "Automated hold timeout or rollback by allocation_svc",
+            },
+            action="cancel-reservation",
+            default_error="Failed to cancel reservation in res_manage_svc.",
+        )
 
-        POST /api/inventory/cancel-reservation
-        Payload: { inventoryId, quantity, reason }
-        """
-        url = f"{self.base_url}/api/internal/inventory/cancel-reservation"
-        payload = {
-            "inventoryId": inventory_id,
-            "referenceId": reference_id,
-            "quantity": quantity,
-            "notes": reason or "Automated hold timeout or rollback by allocation_svc",
-        }
-
-        async with httpx.AsyncClient(
-            headers=self.headers, timeout=self.timeout
-        ) as client:
-            try:
-                data = None
-                response = await client.post(url, json=payload)
-
-                if response.status_code < 400:
-                    return response.json()
-
-                logger.error(
-                    f"[res_client] Cancel reservation failed. Status: {response.status_code}, Body: {response.text}"
-                )
-
-                try:
-                    data = response.json()
-                    err_message = data.get(
-                        "message",
-                        "Failed to reserve stock in res_manage_svc."
-                    )
-                except Exception as e:
-                    logger.error(f"Error in destructuring response in res_client: {e}")
-                    err_message = response.text or "Failed to reserve stock in res_manage_svc."
-
-                return {
-                    "status": "failed",
-                    "statusCode": response.status_code,
-                    "message": err_message,
-                    "data": data
-                }
-            except httpx.RequestError as exc:
-                logger.error(
-                    f"[res_client] HTTP Request Exception while calling cancel-reservation: {exc}"
-                )
-                return {
-                    "status": "failed",
-                    "message": f"Unable to reach res_manage_svc: {str(exc)}",
-                }
+    async def dispatch_stock(
+        self,
+        inventory_id: str,
+        reference_id: str,
+        quantity: int,
+        reason: Optional[str] = None,
+        performed_by: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """POST /api/internal/inventory/dispatch - turns a held reservation into shipped stock."""
+        return await self._post(
+            "/api/internal/inventory/dispatch",
+            {
+                "inventoryId": inventory_id,
+                "referenceId": reference_id,
+                "quantity": quantity,
+                "performedBy": performed_by or "allocation_svc",
+                "notes": reason or "Held stock dispatched by allocation_svc",
+            },
+            action="dispatch",
+            default_error="Failed to dispatch held stock in res_manage_svc.",
+        )
 
 
 # Export a singleton instance

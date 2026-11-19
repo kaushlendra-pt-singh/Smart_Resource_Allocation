@@ -46,7 +46,7 @@ export const registerNGOController = async (req: Request, res: Response): Promis
         // 3. Save NGO with PENDING status and document link
         const ngo = await ngoModel.create({
             name: name.trim(),
-            registrationNumber: registrationNumber.trim(),
+            registrationNumber: registrationNumber,
             adminId,
             location: formattedLocation,
             regDoc,

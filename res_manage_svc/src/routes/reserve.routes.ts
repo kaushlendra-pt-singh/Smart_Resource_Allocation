@@ -1,7 +1,7 @@
 import express from "express";
 import rateLimiter from "../middlewares/rateLimiter";
 import { verifyInternalKey } from "../middlewares/verifyInternalKey";
-import { cancelReservationInternal, reserveStockInternal } from "../controllers/reserve.controller";
+import { cancelReservationInternal, reserveStockInternal, dispatchHoldInternal } from "../controllers/reserve.controller";
 
 const reserveRouter = express.Router();
 
@@ -13,5 +13,8 @@ reserveRouter.post(
     verifyInternalKey,
     cancelReservationInternal
 );
+
+// Turns a held reservation into shipped stock (called by allocation_svc)
+reserveRouter.post("/dispatch", rateLimiter, verifyInternalKey, dispatchHoldInternal);
 
 export default reserveRouter;

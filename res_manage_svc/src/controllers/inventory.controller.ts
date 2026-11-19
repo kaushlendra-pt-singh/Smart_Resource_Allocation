@@ -1,20 +1,50 @@
 import type { Request, Response } from "express";
 import mongoose from "mongoose";
 import { Inventory } from "../models/inventory.model";
+import type { IInventory } from "../models/inventory.model";
 import { InventoryLedger } from "../models/ledger.model";
 import { Resource } from "../models/resource.model";
 import { safeRedis } from "../config/redis";
 import { RedisKeys } from "../utils/redisKeys";
 import { isValidCoordinates } from "../utils/validateCords";
 
+type StockFields = { totalQuantity: number; reservedQuantity?: number; allocatedQuantity?: number };
+
+const stockView = (inv: StockFields) => {
+    const total = inv.totalQuantity ?? 0;
+    const reserved = inv.reservedQuantity ?? 0;
+    const allocated = inv.allocatedQuantity ?? 0; // ?? 0 keeps documents created before this field working
+    return {
+        totalQuantity: total,
+        reservedQuantity: reserved,
+        allocatedQuantity: allocated,
+        availableQuantity: Math.max(0, total - allocated - reserved),
+        ownerAvailableQuantity: Math.max(0, total - allocated)
+    };
+};
+
+const buildStockPayload = (inv: IInventory): string =>
+    JSON.stringify({
+        inventoryId: inv._id.toString(),
+        ngoId: inv.ngoId,
+        resourceId: inv.resourceId.toString(),
+        ...stockView(inv)
+    });
+
+// lean({ virtuals: true }) needs the mongoose-lean-virtuals plugin; this works without it
+const withAvailability = (inv: any) => ({ ...inv, ...stockView(inv) });
+
 export const restockInventory = async (req: Request, res: Response): Promise<Response> => {
     const session = await mongoose.startSession();
     session.startTransaction();
 
     try {
-        const { ngoId, resourceId, warehouseName, address, city, state, coordinates, quantity, performedBy, notes } = req.body;
+        const { ngoId: bodyNgoId, resourceId, warehouseName, address, city, state, coordinates, quantity, notes } = req.body;
+        const performedBy = req.user!._id; // from token, never from the body
+        // SUPER_ADMIN may restock any NGO (must send ngoId); an NGO_ADMIN can only restock their own NGO
+        const ngoId = req.user!.role === "SUPER_ADMIN" ? bodyNgoId : req.user!.ngoId;
 
-        if (!ngoId || !resourceId || !warehouseName || !city || !state || !quantity || !performedBy) {
+        if (!ngoId || !resourceId || !warehouseName || !city || !state || !quantity) {
             await session.abortTransaction();
             session.endSession();
             return res.status(400).json({
@@ -23,7 +53,7 @@ export const restockInventory = async (req: Request, res: Response): Promise<Res
             });
         }
 
-        if (typeof quantity !== "number" || quantity <= 0) {
+        if (typeof quantity !== "number" || !Number.isInteger(quantity) || quantity <= 0) {
             await session.abortTransaction();
             session.endSession();
             return res.status(400).json({
@@ -82,7 +112,7 @@ export const restockInventory = async (req: Request, res: Response): Promise<Res
                     warehouseName: warehouseName.trim(),
                     "location.city": city.trim(),
                     "location.state": state.trim(),
-                    "location.address": address.trim() || "",
+                    "location.address": (address == undefined || address == null) ? "" : address.trim(),
                     ...(coordinates ? { "location.coordinates": coordinates } : {})
                 }
             },
@@ -102,7 +132,7 @@ export const restockInventory = async (req: Request, res: Response): Promise<Res
                     resourceId,
                     action: "RESTOCK",
                     quantity,
-                    performedBy: performedBy.trim(),
+                    performedBy: String(performedBy).trim(),
                     notes: notes ? notes.trim() : `Restocked ${quantity} units at ${warehouseName}`
                 }
             ],
@@ -112,46 +142,32 @@ export const restockInventory = async (req: Request, res: Response): Promise<Res
         await session.commitTransaction();
         session.endSession();
 
-        // Sync with Redis using correct wrapper methods
-        const inventoryIdStr = inventory._id.toString();
-        const availableQty = Math.max(0, inventory.totalQuantity - inventory.reservedQuantity);
-
-        const stockPayload = JSON.stringify({
-            inventoryId: inventoryIdStr,
-            ngoId,
-            resourceId,
-            totalQuantity: inventory.totalQuantity,
-            reservedQuantity: inventory.reservedQuantity,
-            availableQuantity: availableQty
-        });
-
-        await Promise.all([
-            // 1. Inventory stock details by inventory ID
-            safeRedis.set(RedisKeys.inventoryStock(inventoryIdStr), stockPayload, { EX: 86400 }),
-
-            // 2. Warehouse & Resource mapping details
-            safeRedis.set(
-                RedisKeys.warehouseResourceStock(warehouseName.trim(), resourceId as string),
-                stockPayload,
-                { EX: 86400 }
-            ),
-
-            // 3. Atomically increment global available stock by the restocked quantity!
-            safeRedis.incrBy(
-                RedisKeys.resourceGlobalAvailableCount(resourceId as string),
-                quantity
-            ),
-
-            // 4. Update geospatial index
-            coordinates && coordinates.length === 2
-                ? safeRedis.geoAdd(
-                    RedisKeys.warehouseLocations(),
-                    coordinates[0],
-                    coordinates[1],
-                    `${warehouseName.trim()}:${inventoryIdStr}`
-                )
-                : Promise.resolve()
-        ]);
+        // Redis is only a cache: a failure AFTER the DB commit must not turn a successful restock into an error
+        try {
+            const inventoryIdStr = inventory._id.toString();
+            const stockPayload = buildStockPayload(inventory);
+            await Promise.all([
+                safeRedis.set(RedisKeys.inventoryStock(inventoryIdStr), stockPayload, { EX: 86400 }),
+                safeRedis.set(
+                    RedisKeys.warehouseResourceStock(warehouseName.trim(), resourceId as string),
+                    stockPayload,
+                    { EX: 86400 }
+                ),
+                // REMOVED: safeRedis.incrBy(resourceGlobalAvailableCount ...)
+                // It drifts as soon as holds exist (reserve/cancel never touched it). Search the project for
+                // resourceGlobalAvailableCount: if nothing reads it, delete the key from redisKeys.ts too.
+                coordinates && coordinates.length === 2
+                    ? safeRedis.geoAdd(
+                        RedisKeys.warehouseLocations(),
+                        coordinates[0],
+                        coordinates[1],
+                        `${warehouseName.trim()}:${inventoryIdStr}`
+                    )
+                    : Promise.resolve()
+            ]);
+        } catch (cacheErr) {
+            console.error("Redis sync failed after restock (cache refreshes on TTL):", cacheErr);
+        }
 
         return res.status(200).json({
             status: "success",
@@ -160,13 +176,11 @@ export const restockInventory = async (req: Request, res: Response): Promise<Res
                 inventoryId: inventory._id,
                 ngoId: inventory.ngoId,
                 warehouseName: inventory.warehouseName,
-                totalQuantity: inventory.totalQuantity,
-                reservedQuantity: inventory.reservedQuantity,
-                availableQuantity: availableQty
+                ...stockView(inventory)
             }
         });
     } catch (error) {
-        await session.abortTransaction();
+        if (session.inTransaction()) await session.abortTransaction();
         session.endSession();
         console.error("Error in restockInventory:", error);
         return res.status(500).json({
@@ -198,32 +212,45 @@ export const getInventoryByLocation = async (req: Request, res: Response): Promi
 
         // 2. SLOW PATH: Query MongoDB for complex geospatial or filtered queries
         const filter: Record<string, any> = {};
+        const countFilter: Record<string, any> = {};
 
-        // Geospatial Radius Filter ($near using 2dsphere index)
+        // Geospatial Radius Filter
         if (lng && lat) {
             const longitude = parseFloat(lng as string);
             const latitude = parseFloat(lat as string);
-            const maxMeters = parseFloat(maxDistanceKm as string) * 1000;
+            const radiusKm = parseFloat(maxDistanceKm as string);
 
-            if (!isNaN(longitude) && !isNaN(latitude)) {
+            if (!isNaN(longitude) && !isNaN(latitude) && !isNaN(radiusKm)) {
+                // 1. $near for Inventory.find() -> sorts results by distance
                 filter["location.coordinates"] = {
                     $near: {
                         $geometry: {
                             type: "Point",
                             coordinates: [longitude, latitude]
                         },
-                        $maxDistance: maxMeters
+                        $maxDistance: radiusKm * 1000
+                    }
+                };
+
+                // 2. $geoWithin + $centerSphere for Inventory.countDocuments() -> works in aggregation/count
+                countFilter["location.coordinates"] = {
+                    $geoWithin: {
+                        $centerSphere: [[longitude, latitude], radiusKm / 6378.1]
                     }
                 };
             }
         }
 
         if (warehouseName) {
-            filter.warehouseName = (warehouseName as string).trim();
+            const trimmed = (warehouseName as string).trim();
+            filter.warehouseName = trimmed;
+            countFilter.warehouseName = trimmed;
         }
 
         if (ngoId) {
-            filter.ngoId = (ngoId as string).trim();
+            const trimmed = (ngoId as string).trim();
+            filter.ngoId = trimmed;
+            countFilter.ngoId = trimmed;
         }
 
         if (resourceId) {
@@ -234,6 +261,7 @@ export const getInventoryByLocation = async (req: Request, res: Response): Promi
                 });
             }
             filter.resourceId = resourceId;
+            countFilter.resourceId = resourceId;
         }
 
         const pageNum = Math.max(1, parseInt(page as string, 10) || 1);
@@ -249,13 +277,13 @@ export const getInventoryByLocation = async (req: Request, res: Response): Promi
                 .skip(skip)
                 .limit(limitNum)
                 .lean({ virtuals: true }),
-            Inventory.countDocuments(filter)
+            Inventory.countDocuments(countFilter) // Uses $geoWithin instead of $near
         ]);
 
         return res.status(200).json({
             status: "success",
             message: "Nearby inventory retrieved successfully.",
-            data: inventoryItems,
+            data: inventoryItems.map(withAvailability),
             source: "database",
             pagination: {
                 totalItems: totalCount,
@@ -277,176 +305,108 @@ export const dispatchInventory = async (req: Request, res: Response): Promise<Re
     const session = await mongoose.startSession();
     session.startTransaction();
 
+    const fail = async (status: number, message: string): Promise<Response> => {
+        if (session.inTransaction()) await session.abortTransaction();
+        return res.status(status).json({ status: "failed", message });
+    };
+
     try {
-        const { inventoryId, requestingNgoId, quantity, performedBy, notes } = req.body;
+        const { inventoryId, quantity, recipientNgoId, notes } = req.body;
+        const user = req.user!; // route is behind authMiddleWare
 
-        // 1. Basic Input Validation
-        if (!inventoryId || !requestingNgoId || !quantity || !performedBy) {
-            await session.abortTransaction();
-            session.endSession();
-            return res.status(400).json({
-                status: "failed",
-                message: "inventoryId, requestingNgoId, quantity, and performedBy are required."
-            });
+        // 1. Validation
+        if (!inventoryId || !quantity) {
+            return await fail(400, "inventoryId and quantity are required.");
+        }
+        if (typeof quantity !== "number" || !Number.isInteger(quantity) || quantity <= 0) {
+            return await fail(400, "Quantity must be a positive integer.");
+        }
+        if (!mongoose.Types.ObjectId.isValid(String(inventoryId))) {
+            return await fail(400, "Invalid inventoryId format.");
         }
 
-        if (typeof quantity !== "number" || quantity <= 0) {
-            await session.abortTransaction();
-            session.endSession();
-            return res.status(400).json({
-                status: "failed",
-                message: "Quantity must be a positive number greater than 0."
-            });
-        }
-
-        // 2. Fetch inventory record inside Mongoose session
+        // 2. Ownership: only the owning NGO's admin or a super admin (route already limits roles)
         const inventory = await Inventory.findById(inventoryId).session(session);
-
         if (!inventory) {
-            await session.abortTransaction();
-            session.endSession();
-            return res.status(404).json({
-                status: "failed",
-                message: `Inventory document with ID ${inventoryId} not found.`
-            });
+            return await fail(404, `Inventory document with ID ${inventoryId} not found.`);
+        }
+        if (user.role !== "SUPER_ADMIN" && inventory.ngoId !== user.ngoId) {
+            return await fail(403, "Only the owning NGO's admin or a super admin can dispatch directly. Other NGOs must use allocation.");
         }
 
-        const isOwnerNgo = inventory.ngoId === requestingNgoId || req.user?.role === "SUPER_ADMIN";
-        const availableQty = Math.max(0, inventory.totalQuantity - inventory.reservedQuantity);
-
-        let dispatchAmount = 0;
-        let decrementReserved = 0;
-
-        // 3. Strict Unreserved-First Allocation Guard
-        if (availableQty >= quantity) {
-            // CASE 1: Unreserved stock is enough -> ANY NGO (owner or non-owner) takes from unreserved stock!
-            dispatchAmount = quantity;
-            decrementReserved = 0; // Reserved stock is untouched
-        } else if (isOwnerNgo) {
-            // CASE 2: Requested quantity exceeds unreserved stock AND requester is OWNER NGO
-            // Cap dispatch to total physical stock available in warehouse
-            dispatchAmount = Math.min(quantity, inventory.totalQuantity);
-
-            if (dispatchAmount === 0) {
-                await session.abortTransaction();
-                session.endSession();
-                return res.status(400).json({
-                    status: "failed",
-                    message: "Warehouse is completely out of stock."
-                });
-            }
-
-            // Consume all remaining unreserved stock first, then take the deficit from reserved
-            decrementReserved = dispatchAmount - availableQty;
-        } else {
-            // Case C: Outside NGO and requestedQty > availableQty -> Cap dispatch to availableQty only!
-            if (availableQty === 0) {
-                await session.abortTransaction();
-                session.endSession();
-                return res.status(403).json({
-                    status: "failed",
-                    message: `Access denied. Unreserved stock is 0. The remaining ${inventory.reservedQuantity} reserved units belong exclusively to NGO "${inventory.ngoId}".`
-                });
-            }
-            // Cap dispatch amount to availableQty
-            dispatchAmount = availableQty;
-            decrementReserved = 0;
-        }
-
-        // 4. Perform Atomic Database Update
-        const updatedInventory = await Inventory.findOneAndUpdate(
+        // 3. Atomic: only unallocated stock may leave (total - allocated >= quantity)
+        const updated = await Inventory.findOneAndUpdate(
             {
                 _id: inventoryId,
-                totalQuantity: { $gte: dispatchAmount },
-                reservedQuantity: { $gte: decrementReserved }
-            },
-            {
-                $inc: {
-                    totalQuantity: -dispatchAmount,
-                    reservedQuantity: -decrementReserved
+                $expr: {
+                    $gte: [{ $subtract: ["$totalQuantity", { $ifNull: ["$allocatedQuantity", 0] }] }, quantity]
                 }
             },
+            { $inc: { totalQuantity: -quantity } }, // reservedQuantity is a policy cap: never changed here
             { returnDocument: "after", session, runValidators: true }
         );
-
-        if (!updatedInventory) {
-            await session.abortTransaction();
-            session.endSession();
-            return res.status(400).json({
-                status: "failed",
-                message: "Stock dispatch failed due to concurrent update conflicts."
-            });
+        if (!updated) {
+            const unallocated = Math.max(0, inventory.totalQuantity - (inventory.allocatedQuantity ?? 0));
+            return await fail(409, `Insufficient unallocated stock. Unallocated: ${unallocated}, requested: ${quantity}.`);
         }
 
-        // 5. Record Audit Ledger Entry
+        // 4. Ledger (no referenceId: this shipment is not tied to an allocation)
         await InventoryLedger.create(
             [
                 {
-                    inventoryId: updatedInventory._id,
-                    resourceId: updatedInventory.resourceId,
+                    inventoryId: updated._id,
+                    resourceId: updated.resourceId,
                     action: "DISPATCH",
-                    quantity: -dispatchAmount,
-                    performedBy: performedBy.trim(),
+                    quantity: -quantity,
+                    performedBy: user._id,
                     notes: notes
-                        ? notes.trim()
-                        : `Dispatched ${dispatchAmount} units (${decrementReserved} drawn from reserved) to NGO ${requestingNgoId} from warehouse ${updatedInventory.warehouseName}`
+                        ? String(notes).trim()
+                        : `Direct dispatch of ${quantity} units${recipientNgoId ? ` to NGO ${recipientNgoId}` : ""} from ${updated.warehouseName}`
                 }
             ],
             { session }
         );
 
-        // 6. Commit DB Transaction
         await session.commitTransaction();
-        session.endSession();
 
-        // 7. Synchronize Redis Caches
-        const inventoryIdStr = updatedInventory._id.toString();
-        const resourceIdStr = updatedInventory.resourceId.toString();
-        const newAvailableQty = Math.max(0, updatedInventory.totalQuantity - updatedInventory.reservedQuantity);
-
-        const stockPayload = JSON.stringify({
-            inventoryId: inventoryIdStr,
-            ngoId: updatedInventory.ngoId,
-            resourceId: resourceIdStr,
-            totalQuantity: updatedInventory.totalQuantity,
-            reservedQuantity: updatedInventory.reservedQuantity,
-            availableQuantity: newAvailableQty
-        });
-
-        await Promise.all([
-            safeRedis.set(RedisKeys.inventoryStock(inventoryIdStr), stockPayload, { EX: 86400 }),
-            safeRedis.set(RedisKeys.warehouseResourceStock(updatedInventory.warehouseName, resourceIdStr), stockPayload, { EX: 86400 }),
-            safeRedis.decrBy(RedisKeys.resourceGlobalAvailableCount(resourceIdStr), dispatchAmount)
-        ]);
+        // 5. Non-fatal cache sync
+        try {
+            const idStr = updated._id.toString();
+            const payload = buildStockPayload(updated);
+            await Promise.all([
+                safeRedis.set(RedisKeys.inventoryStock(idStr), payload, { EX: 86400 }),
+                safeRedis.set(RedisKeys.warehouseResourceStock(updated.warehouseName, updated.resourceId.toString()), payload, { EX: 86400 })
+            ]);
+        } catch (cacheErr) {
+            console.error("Redis sync failed after dispatch (cache refreshes on TTL):", cacheErr);
+        }
 
         return res.status(200).json({
             status: "success",
-            message: `Successfully dispatched ${dispatchAmount} units.`,
+            message: `Successfully dispatched ${quantity} units.`,
             data: {
-                inventoryId: updatedInventory._id,
-                warehouseName: updatedInventory.warehouseName,
-                dispatchedQuantity: dispatchAmount,
-                clearedReservedQuantity: decrementReserved,
-                totalQuantity: updatedInventory.totalQuantity,
-                reservedQuantity: updatedInventory.reservedQuantity,
-                availableQuantity: newAvailableQty
+                inventoryId: updated._id,
+                warehouseName: updated.warehouseName,
+                dispatchedQuantity: quantity,
+                ...stockView(updated)
             }
         });
     } catch (error) {
-        await session.abortTransaction();
-        session.endSession();
+        if (session.inTransaction()) await session.abortTransaction();
         console.error("Error in dispatchInventory:", error);
         return res.status(500).json({
             status: "failed",
             message: "Internal server error while dispatching inventory."
         });
+    } finally {
+        session.endSession();
     }
 };
 
 export const getInventoryLedger = async (req: Request, res: Response): Promise<Response> => {
     try {
         const { inventoryId } = req.params;
-        const { action, page = "1", limit = "20" } = req.query;
+        const { action, referenceId, page = "1", limit = "20" } = req.query;
 
         // 1. Validate Inventory ID Format
         if (!inventoryId || !mongoose.Types.ObjectId.isValid(inventoryId.toString())) {
@@ -457,16 +417,28 @@ export const getInventoryLedger = async (req: Request, res: Response): Promise<R
         }
 
         // 2. Verify Inventory Record Exists
-        const inventoryExists = await Inventory.exists({ _id: inventoryId });
-        if (!inventoryExists) {
+        const inventoryDoc = await Inventory.findById(inventoryId).select("ngoId").lean();
+        if (!inventoryDoc) {
             return res.status(404).json({
                 status: "failed",
                 message: `Inventory document with ID ${inventoryId} not found.`
             });
         }
 
+        if (req.user?.role !== "SUPER_ADMIN" && inventoryDoc.ngoId !== req.user?.ngoId) {
+            return res.status(403).json({
+                status: "failed",
+                message: "You can only view the ledger of your own NGO's inventory."
+            });
+        }
+
         // 3. Build Dynamic Query Filter
         const filter: Record<string, any> = { inventoryId };
+
+        // Trace everything that happened for one allocation (e.g. ALLOC-1A2B3C4D)
+        if (referenceId && typeof referenceId === "string") {
+            filter.referenceId = referenceId.trim();
+        }
 
         if (action && typeof action === "string") {
             const validActions = [

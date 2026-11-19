@@ -3,7 +3,7 @@ import mongoose, { Schema, Document } from "mongoose";
 export interface IResource extends Document {
     name: string;
     category: "FOOD" | "MEDICAL" | "SHELTER" | "CLOTHING" | "WATER" | "OTHER";
-    unit: "KG" | "LITERS" | "BOXES" | "UNITS" | "PACKETS";
+    unit: "KG" | "LITERS" | "BOXES" | "UNITS" | "PACKETS" | "METRES";
     description?: string;
     isPerishable: boolean;
     createdAt: Date;
@@ -22,7 +22,7 @@ const ResourceSchema: Schema = new Schema<IResource>(
         unit: {
             type: String,
             required: true,
-            enum: ["KG", "LITERS", "BOXES", "UNITS", "PACKETS"]
+            enum: ["KG", "LITERS", "BOXES", "UNITS", "PACKETS", "METRES"]
         },
         description: { type: String, trim: true },
         isPerishable: { type: Boolean, default: false }

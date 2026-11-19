@@ -48,6 +48,11 @@ const UserSchema: Schema = new Schema<IUser>(
       required: true,
       default: 'RESIDENT'
     },
+    ngoId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "NGO",
+      default: null,
+    },
     joinedNGOs: [
       {
         _id: false, // Prevents Mongoose from generating an extra sub-id for every entry

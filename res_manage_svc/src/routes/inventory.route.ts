@@ -8,6 +8,8 @@ import {
     restockInventory
 } from "../controllers/inventory.controller";
 
+import { setOwnerReserve } from "../controllers/inventory.ownerreserve.controller";
+
 const invenRouter = express.Router();
 
 invenRouter.post(
@@ -34,6 +36,14 @@ invenRouter.get(
     authMiddleWare,
     requireRoles(["SUPER_ADMIN", "NGO_ADMIN"]),
     getInventoryLedger
+);
+
+invenRouter.patch(
+    "/:id/owner-reserve",
+    rateLimiter,
+    authMiddleWare,
+    requireRoles(["SUPER_ADMIN", "NGO_ADMIN"]),
+    setOwnerReserve
 );
 
 export default invenRouter;

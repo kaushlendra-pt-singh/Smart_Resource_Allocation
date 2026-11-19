@@ -1,167 +1,205 @@
 import type { Request, Response } from "express";
 import mongoose from "mongoose";
 import { Inventory } from "../models/inventory.model";
+import type { IInventory } from "../models/inventory.model";
 import { InventoryLedger } from "../models/ledger.model";
 import { safeRedis } from "../config/redis";
 import { RedisKeys } from "../utils/redisKeys";
+
+// Keep your existing imports: Request, Response, mongoose, Inventory, IInventory, InventoryLedger, safeRedis, RedisKeys
+
+type Body = Record<string, unknown>;
+
+const abortAndRespond = async (
+    session: mongoose.ClientSession,
+    res: Response,
+    statusCode: number,
+    body: Body
+): Promise<Response> => {
+    if (session.inTransaction()) await session.abortTransaction();
+    return res.status(statusCode).json(body);
+};
+
+const buildStockPayload = (inv: IInventory): string =>
+    JSON.stringify({
+        inventoryId: inv._id.toString(),
+        ngoId: inv.ngoId,
+        resourceId: inv.resourceId.toString(),
+        totalQuantity: inv.totalQuantity,
+        reservedQuantity: inv.reservedQuantity,   // owner-protected floor
+        allocatedQuantity: inv.allocatedQuantity, // active allocation holds
+        availableQuantity: Math.max(0, inv.totalQuantity - inv.allocatedQuantity - inv.reservedQuantity),
+        ownerAvailableQuantity: Math.max(0, inv.totalQuantity - inv.allocatedQuantity)
+    });
+
+// Redis is a cache: a failure AFTER the DB commit must never turn a committed change into an error.
+const syncRedis = async (inv: IInventory, lockOp: "set" | "del", referenceId: string): Promise<void> => {
+    try {
+        const id = inv._id.toString();
+        const payload = buildStockPayload(inv);
+        await Promise.all([
+            safeRedis.set(RedisKeys.inventoryStock(id), payload, { EX: 86400 }),
+            safeRedis.set(RedisKeys.warehouseResourceStock(inv.warehouseName, inv.resourceId.toString()), payload, { EX: 86400 }),
+            lockOp === "set"
+                ? safeRedis.set(RedisKeys.reservationLock(id), referenceId, { EX: 600 })
+                : safeRedis.del(RedisKeys.reservationLock(id))
+        ]);
+    } catch (err) {
+        console.error("Redis sync failed after commit (cache will refresh on TTL):", err);
+    }
+};
+
+const stockData = (inv: IInventory, referenceId: string) => ({
+    inventoryId: inv._id,
+    referenceId,
+    totalQuantity: inv.totalQuantity,
+    reservedQuantity: inv.reservedQuantity,
+    allocatedQuantity: inv.allocatedQuantity,
+    availableQuantity: Math.max(0, inv.totalQuantity - inv.allocatedQuantity - inv.reservedQuantity),
+    ownerAvailableQuantity: Math.max(0, inv.totalQuantity - inv.allocatedQuantity)
+});
+
+const getNetHold = async (
+    inventoryId: string,
+    referenceId: string,
+    session: mongoose.ClientSession
+): Promise<number> => {
+    const agg = await InventoryLedger.aggregate([
+        {
+            $match: {
+                inventoryId: new mongoose.Types.ObjectId(inventoryId),
+                referenceId,
+                action: { $in: ["RESERVE", "CANCEL_RESERVATION", "DISPATCH"] }
+            }
+        },
+        { $group: { _id: null, net: { $sum: "$quantity" } } }
+    ]).session(session);
+    return agg[0]?.net ?? 0;
+};
 
 export const reserveStockInternal = async (req: Request, res: Response): Promise<Response> => {
     const session = await mongoose.startSession();
     session.startTransaction();
 
     try {
-        const { inventoryId, quantity, referenceId, performedBy = "allocation_svc", notes } = req.body;
+        const {
+            inventoryId,
+            quantity,
+            referenceId,
+            performedBy = "allocation_svc",
+            notes,
+            includeOwnerReserve = false // true => requester may use owner-protected stock (reservedQuantity)
+        } = req.body;
 
         // 1. Validation
         if (!inventoryId || !quantity || !referenceId) {
-            await session.abortTransaction();
-            session.endSession();
-            return res.status(400).json({
+            return await abortAndRespond(session, res, 400, {
                 status: "failed",
                 message: "inventoryId, quantity, and referenceId (NGO Request ID) are required."
             });
         }
-
-        if (typeof quantity !== "number" || quantity <= 0) {
-            await session.abortTransaction();
-            session.endSession();
-            return res.status(400).json({
+        if (typeof quantity !== "number" || !Number.isInteger(quantity) || quantity <= 0) {
+            return await abortAndRespond(session, res, 400, {
                 status: "failed",
-                message: "Quantity must be a positive number greater than 0."
+                message: "Quantity must be a positive integer."
             });
         }
-
+        if (typeof includeOwnerReserve !== "boolean") {
+            return await abortAndRespond(session, res, 400, {
+                status: "failed",
+                message: "includeOwnerReserve must be a boolean."
+            });
+        }
         if (!mongoose.Types.ObjectId.isValid(inventoryId as string)) {
-            await session.abortTransaction();
-            session.endSession();
-            return res.status(400).json({
+            return await abortAndRespond(session, res, 400, {
                 status: "failed",
                 message: "Invalid inventoryId format."
             });
         }
 
-        // 2. Fetch inventory record within session for precision check
-        const existingInventory = await Inventory.findById(inventoryId).session(session);
-
-        if (!existingInventory) {
-            await session.abortTransaction();
-            session.endSession();
-            return res.status(404).json({
+        // 2. Precision check (gives a useful error message; the atomic update below is the real guard)
+        const existing = await Inventory.findById(inventoryId).session(session);
+        if (!existing) {
+            return await abortAndRespond(session, res, 404, {
                 status: "failed",
                 message: `Inventory document with ID ${inventoryId} not found.`
             });
         }
 
-        // Calculate current liquid available stock
-        const currentAvailable = existingInventory.totalQuantity - existingInventory.reservedQuantity;
-
-        if (currentAvailable < quantity) {
-            await session.abortTransaction();
-            session.endSession();
-            return res.status(409).json({
+        const floor = includeOwnerReserve ? 0 : existing.reservedQuantity;
+        const usable = existing.totalQuantity - (existing.allocatedQuantity ?? 0) - floor;
+        if (usable < quantity) {
+            return await abortAndRespond(session, res, 409, {
                 status: "failed",
-                message: `Insufficient available stock for reservation. Available: ${currentAvailable}, Requested: ${quantity}.`,
-                data: {
-                    inventoryId,
-                    totalQuantity: existingInventory.totalQuantity,
-                    reservedQuantity: existingInventory.reservedQuantity,
-                    availableQuantity: currentAvailable
-                }
+                message: `Insufficient stock for reservation. Usable: ${Math.max(0, usable)}, Requested: ${quantity}.`,
+                data: stockData(existing, referenceId)
             });
         }
 
-        // 3. Atomic Reservation via $expr (Guarantees race-condition protection in MongoDB)
-        // Match condition: (totalQuantity - reservedQuantity) >= quantity
-        const updatedInventory = await Inventory.findOneAndUpdate(
+        // 3. Atomic reservation: (total - allocated - (owner tier ? 0 : reserved)) >= quantity
+        //    $ifNull keeps documents created before allocatedQuantity existed working.
+        const floorExpr = includeOwnerReserve ? 0 : { $ifNull: ["$reservedQuantity", 0] };
+        const updated = await Inventory.findOneAndUpdate(
             {
                 _id: inventoryId,
-                $expr: {$gte: [
-                        { $subtract: ["$totalQuantity", "$reservedQuantity"] },
+                $expr: {
+                    $gte: [
+                        {
+                            $subtract: [
+                                { $subtract: ["$totalQuantity", { $ifNull: ["$allocatedQuantity", 0] }] },
+                                floorExpr
+                            ]
+                        },
                         quantity
                     ]
                 }
             },
-            {
-                $inc: { reservedQuantity: quantity }
-            },
-            {
-                returnDocument: "after",
-                session,
-                runValidators: true
-            }
+            { $inc: { allocatedQuantity: quantity } },
+            { returnDocument: "after", session, runValidators: true }
         );
 
-        if (!updatedInventory) {
-            await session.abortTransaction();
-            session.endSession();
-            return res.status(409).json({
+        if (!updated) {
+            return await abortAndRespond(session, res, 409, {
                 status: "failed",
-                message: "Stock reservation failed due to a concurrent reservation lock conflict."
+                message: "Stock reservation failed due to a concurrent reservation conflict."
             });
         }
 
-        // 4. Create Ledger Audit Entry (Linked to referenceId)
+        // 4. Ledger audit entry
         await InventoryLedger.create(
             [
                 {
-                    inventoryId: updatedInventory._id,
-                    resourceId: updatedInventory.resourceId,
+                    inventoryId: updated._id,
+                    resourceId: updated.resourceId,
                     action: "RESERVE",
-                    quantity: quantity,
-                    referenceId: referenceId.trim(),
-                    performedBy: performedBy.trim(),
-                    notes: notes
-                        ? notes.trim()
-                        : `Reserved ${quantity} units for referenceId: ${referenceId}`
+                    quantity,
+                    referenceId: String(referenceId).trim(),
+                    performedBy: String(performedBy).trim(),
+                    notes: notes ? String(notes).trim() : `Reserved ${quantity} units for referenceId: ${referenceId}`
                 }
             ],
             { session }
         );
 
-        // 5. Commit DB Transaction
+        // 5. Commit, then (non-fatal) cache sync
         await session.commitTransaction();
-        session.endSession();
-
-        // 6. Redis Sync
-        const inventoryIdStr = updatedInventory._id.toString();
-        const resourceIdStr = updatedInventory.resourceId.toString();
-        const newAvailableQty = updatedInventory.totalQuantity - updatedInventory.reservedQuantity;
-
-        const stockPayload = JSON.stringify({
-            inventoryId: inventoryIdStr,
-            ngoId: updatedInventory.ngoId,
-            resourceId: resourceIdStr,
-            totalQuantity: updatedInventory.totalQuantity,
-            reservedQuantity: updatedInventory.reservedQuantity,
-            availableQuantity: newAvailableQty
-        });
-
-        await Promise.all([
-            safeRedis.set(RedisKeys.inventoryStock(inventoryIdStr), stockPayload, { EX: 86400 }),
-            safeRedis.set(RedisKeys.warehouseResourceStock(updatedInventory.warehouseName, resourceIdStr), stockPayload, { EX: 86400 }),
-            // Set temporary reservation lock in Redis for allocation tracking (Key #6)
-            safeRedis.set(RedisKeys.reservationLock(inventoryIdStr), referenceId, { EX: 600 }) // 10 min lock TTL
-        ]);
+        await syncRedis(updated, "set", String(referenceId));
 
         return res.status(200).json({
             status: "success",
             message: `Successfully reserved ${quantity} units for referenceId ${referenceId}.`,
-            data: {
-                inventoryId: updatedInventory._id,
-                referenceId,
-                totalQuantity: updatedInventory.totalQuantity,
-                reservedQuantity: updatedInventory.reservedQuantity,
-                availableQuantity: newAvailableQty
-            }
+            data: stockData(updated, referenceId)
         });
     } catch (error) {
-        await session.abortTransaction();
-        session.endSession();
+        // inTransaction() is false after a successful commit, so this can never throw "abort after commit"
+        if (session.inTransaction()) await session.abortTransaction();
         console.error("Error in reserveStockInternal:", error);
         return res.status(500).json({
             status: "failed",
             message: "Internal server error while reserving stock."
         });
+    } finally {
+        session.endSession();
     }
 };
 
@@ -174,146 +212,187 @@ export const cancelReservationInternal = async (req: Request, res: Response): Pr
 
         // 1. Validation
         if (!inventoryId || !quantity || !referenceId) {
-            await session.abortTransaction();
-            session.endSession();
-            return res.status(400).json({
+            return await abortAndRespond(session, res, 400, {
                 status: "failed",
                 message: "inventoryId, quantity, and referenceId are required."
             });
         }
-
-        if (typeof quantity !== "number" || quantity <= 0) {
-            await session.abortTransaction();
-            session.endSession();
-            return res.status(400).json({
+        if (typeof quantity !== "number" || !Number.isInteger(quantity) || quantity <= 0) {
+            return await abortAndRespond(session, res, 400, {
                 status: "failed",
-                message: "Quantity must be a positive number greater than 0."
+                message: "Quantity must be a positive integer."
             });
         }
-
         if (!mongoose.Types.ObjectId.isValid(inventoryId as string)) {
-            await session.abortTransaction();
-            session.endSession();
-            return res.status(400).json({
+            return await abortAndRespond(session, res, 400, {
                 status: "failed",
                 message: "Invalid inventoryId format."
             });
         }
 
-        // 2. Fetch inventory record inside session
-        const existingInventory = await Inventory.findById(inventoryId).session(session);
+        const ref = String(referenceId).trim();
 
-        if (!existingInventory) {
-            await session.abortTransaction();
-            session.endSession();
-            return res.status(404).json({
-                status: "failed",
-                message: `Inventory document with ID ${inventoryId} not found.`
-            });
-        }
-
-        // Guard: Cannot release more stock than is currently marked as reserved
-        if (existingInventory.reservedQuantity < quantity) {
-            await session.abortTransaction();
-            session.endSession();
-            return res.status(400).json({
-                status: "failed",
-                message: `Cannot release ${quantity} units. Current reserved quantity is only ${existingInventory.reservedQuantity}.`,
-                data: {
-                    inventoryId,
-                    totalQuantity: existingInventory.totalQuantity,
-                    reservedQuantity: existingInventory.reservedQuantity
+        // 2. Reference-scoped guard: only release what THIS referenceId still holds on THIS inventory.
+        //    Without this, a rollback/ambiguous-cancel could free another allocation's hold.
+        //    RESERVE rows are +qty and CANCEL_RESERVATION rows are -qty, so the sum is the net hold.
+        //    (If DISPATCH consumes holds in your system, include its quantity for this ref in the sum.)
+        const agg = await InventoryLedger.aggregate([
+            {
+                $match: {
+                    inventoryId: new mongoose.Types.ObjectId(inventoryId),
+                    referenceId: ref,
+                    action: { $in: ["RESERVE", "CANCEL_RESERVATION"] }
                 }
+            },
+            { $group: { _id: null, net: { $sum: "$quantity" } } }
+        ]).session(session);
+        const heldForRef = await getNetHold(inventoryId, ref, session); // now also subtracts dispatched units
+
+        if (heldForRef < quantity) {
+            return await abortAndRespond(session, res, 409, {
+                status: "failed",
+                message: `No active hold of ${quantity} units for referenceId ${ref} on this inventory (held: ${heldForRef}).`
             });
         }
 
-        // 3. Atomic Decrement of reservedQuantity
-        const updatedInventory = await Inventory.findOneAndUpdate(
-            {
-                _id: inventoryId,
-                reservedQuantity: { $gte: quantity } // Double-check guard at execution time
-            },
-            {
-                $inc: { reservedQuantity: -quantity }
-            },
-            {
-                returnDocument: "after",
-                session,
-                runValidators: true
-            }
+        // 3. Atomic decrement of allocatedQuantity (never touches the owner-protected reservedQuantity)
+        const updated = await Inventory.findOneAndUpdate(
+            { _id: inventoryId, allocatedQuantity: { $gte: quantity } },
+            { $inc: { allocatedQuantity: -quantity } },
+            { returnDocument: "after", session, runValidators: true }
         );
 
-        if (!updatedInventory) {
-            await session.abortTransaction();
-            session.endSession();
-            return res.status(409).json({
+        if (!updated) {
+            return await abortAndRespond(session, res, 409, {
                 status: "failed",
-                message: "Failed to release reservation due to a concurrent database lock conflict."
+                message: "Failed to release reservation: inventory not found or allocated quantity too low."
             });
         }
 
-        // 4. Record CANCEL Ledger Audit Entry (Linked to referenceId)
+        // 4. Ledger audit entry
         await InventoryLedger.create(
             [
                 {
-                    inventoryId: updatedInventory._id,
-                    resourceId: updatedInventory.resourceId,
+                    inventoryId: updated._id,
+                    resourceId: updated.resourceId,
                     action: "CANCEL_RESERVATION",
-                    quantity: -quantity, // Representing reduction in reserved hold
-                    referenceId: referenceId.trim(),
-                    performedBy: performedBy.trim(),
-                    notes: notes
-                        ? notes.trim()
-                        : `Canceled reservation of ${quantity} units for referenceId: ${referenceId}`
+                    quantity: -quantity,
+                    referenceId: ref,
+                    performedBy: String(performedBy).trim(),
+                    notes: notes ? String(notes).trim() : `Canceled reservation of ${quantity} units for referenceId: ${ref}`
                 }
             ],
             { session }
         );
 
-        // 5. Commit DB Transaction
+        // 5. Commit, then (non-fatal) cache sync
         await session.commitTransaction();
-        session.endSession();
-
-        // 6. Redis Sync & Lock Cleanup
-        const inventoryIdStr = updatedInventory._id.toString();
-        const resourceIdStr = updatedInventory.resourceId.toString();
-        const newAvailableQty = updatedInventory.totalQuantity - updatedInventory.reservedQuantity;
-
-        const stockPayload = JSON.stringify({
-            inventoryId: inventoryIdStr,
-            ngoId: updatedInventory.ngoId,
-            resourceId: resourceIdStr,
-            totalQuantity: updatedInventory.totalQuantity,
-            reservedQuantity: updatedInventory.reservedQuantity,
-            availableQuantity: newAvailableQty
-        });
-
-        await Promise.all([
-            // Update inventory caches so availableQuantity reflects released stock
-            safeRedis.set(RedisKeys.inventoryStock(inventoryIdStr), stockPayload, { EX: 86400 }),
-            safeRedis.set(RedisKeys.warehouseResourceStock(updatedInventory.warehouseName, resourceIdStr), stockPayload, { EX: 86400 }),
-            // Remove temporary reservation lock in Redis (Key #6)
-            safeRedis.del(RedisKeys.reservationLock(inventoryIdStr))
-        ]);
+        await syncRedis(updated, "del", ref);
 
         return res.status(200).json({
             status: "success",
-            message: `Successfully canceled reservation of ${quantity} units for referenceId ${referenceId}.`,
-            data: {
-                inventoryId: updatedInventory._id,
-                referenceId,
-                totalQuantity: updatedInventory.totalQuantity,
-                reservedQuantity: updatedInventory.reservedQuantity,
-                availableQuantity: newAvailableQty
-            }
+            message: `Successfully canceled reservation of ${quantity} units for referenceId ${ref}.`,
+            data: stockData(updated, ref)
         });
     } catch (error) {
-        await session.abortTransaction();
-        session.endSession();
+        if (session.inTransaction()) await session.abortTransaction();
         console.error("Error in cancelReservationInternal:", error);
         return res.status(500).json({
             status: "failed",
             message: "Internal server error while canceling stock reservation."
         });
+    } finally {
+        session.endSession();
+    }
+};
+
+export const dispatchHoldInternal = async (req: Request, res: Response): Promise<Response> => {
+    const session = await mongoose.startSession();
+    session.startTransaction();
+
+    try {
+        const { inventoryId, quantity, referenceId, performedBy = "allocation_svc", notes } = req.body;
+
+        // 1. Validation
+        if (!inventoryId || !quantity || !referenceId) {
+            return await abortAndRespond(session, res, 400, {
+                status: "failed",
+                message: "inventoryId, quantity, and referenceId are required."
+            });
+        }
+        if (typeof quantity !== "number" || !Number.isInteger(quantity) || quantity <= 0) {
+            return await abortAndRespond(session, res, 400, {
+                status: "failed",
+                message: "Quantity must be a positive integer."
+            });
+        }
+        if (!mongoose.Types.ObjectId.isValid(inventoryId as string)) {
+            return await abortAndRespond(session, res, 400, {
+                status: "failed",
+                message: "Invalid inventoryId format."
+            });
+        }
+
+        const ref = String(referenceId).trim();
+
+        // 2. Only what THIS reference still holds on THIS inventory can be dispatched
+        const heldForRef = await getNetHold(inventoryId, ref, session);
+        if (heldForRef < quantity) {
+            return await abortAndRespond(session, res, 409, {
+                status: "failed",
+                message: `No active hold of ${quantity} units for referenceId ${ref} on this inventory (held: ${heldForRef}).`
+            });
+        }
+
+        // 3. Atomic: stock leaves the shelf and the hold disappears together
+        const updated = await Inventory.findOneAndUpdate(
+            {
+                _id: inventoryId,
+                allocatedQuantity: { $gte: quantity },
+                totalQuantity: { $gte: quantity }
+            },
+            { $inc: { allocatedQuantity: -quantity, totalQuantity: -quantity } },
+            { returnDocument: "after", session, runValidators: true }
+        );
+        if (!updated) {
+            return await abortAndRespond(session, res, 409, {
+                status: "failed",
+                message: "Dispatch failed: allocated or total quantity too low (concurrent update?)."
+            });
+        }
+
+        // 4. Ledger
+        await InventoryLedger.create(
+            [
+                {
+                    inventoryId: updated._id,
+                    resourceId: updated.resourceId,
+                    action: "DISPATCH",
+                    quantity: -quantity,
+                    referenceId: ref,
+                    performedBy: String(performedBy).trim(),
+                    notes: notes ? String(notes).trim() : `Dispatched ${quantity} held units for referenceId: ${ref}`
+                }
+            ],
+            { session }
+        );
+
+        await session.commitTransaction();
+        await syncRedis(updated, "del", ref);
+
+        return res.status(200).json({
+            status: "success",
+            message: `Successfully dispatched ${quantity} units for referenceId ${ref}.`,
+            data: stockData(updated, ref)
+        });
+    } catch (error) {
+        if (session.inTransaction()) await session.abortTransaction();
+        console.error("Error in dispatchHoldInternal:", error);
+        return res.status(500).json({
+            status: "failed",
+            message: "Internal server error while dispatching held stock."
+        });
+    } finally {
+        session.endSession();
     }
 };

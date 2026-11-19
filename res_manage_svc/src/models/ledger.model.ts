@@ -28,4 +28,6 @@ const InventoryLedgerSchema: Schema = new Schema<IInventoryLedger>(
     { timestamps: { createdAt: true, updatedAt: false } } // Immutable logs (only createdAt)
 );
 
+InventoryLedgerSchema.index({ inventoryId: 1, referenceId:1 });
+
 export const InventoryLedger = mongoose.model<IInventoryLedger>("InventoryLedger", InventoryLedgerSchema);

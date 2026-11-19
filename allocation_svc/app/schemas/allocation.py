@@ -19,7 +19,7 @@ class AllocationItemRequest(BaseModel):
 
 
 class AllocationRequest(BaseModel):
-    requesterNgoId: str = Field(..., description="ID of the NGO making the request")
+    requesterNgoId: Optional[str] = Field(..., description="ID of the NGO making the request")
     items: List[AllocationItemRequest] = Field(
         ..., min_length=1, description="List of items to allocate"
     )
@@ -60,6 +60,8 @@ class WarehouseAllocationBreakdown(BaseModel):
     allocatedQuantity: int
     distanceKm: float
     warehouseCoordinates: List[float]
+    lineId: Optional[str] = None                 # id of the request line (use it to approve/reject/cancel)
+    lineStatus: str = "PENDING"                  # PENDING | APPROVED | REJECTED | CANCELLED | DISPATCHED
 
 
 class ItemAllocationResult(BaseModel):
@@ -67,11 +69,13 @@ class ItemAllocationResult(BaseModel):
     requestedQuantity: int
     totalAllocatedQuantity: int
     isFullyAllocated: bool
+    heldQuantity: int = 0      # approved lines: stock is already held
+    pendingQuantity: int = 0   # waiting for the owning NGO's approval, nothing held yet
     allocations: List[WarehouseAllocationBreakdown]
 
 
 class AllocationResponse(BaseModel):
-    status: str = Field(..., description="success, partial_success, or failed")
+    status: str = Field(..., description="success | pending_approval | partial_success | failed")
     message: str
     requesterNgoId: str
     referenceId: str = Field(
