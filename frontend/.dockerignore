@@ -1,0 +1,9 @@
+﻿# keep local installs and builds out of the image
+node_modules
+dist
+.env
+.env.*
+*.log
+Dockerfile
+.dockerignore
+.git
