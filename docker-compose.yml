@@ -1,0 +1,166 @@
+# Whole stack on one machine: `docker compose up -d --build`
+#
+# Only the gateway (nginx + React build) is published. The services, workers and Redis talk over the
+# private compose network, so internal routes and Redis are never reachable from outside.
+# MongoDB is external (Atlas) and comes from MONGODB_URI in each service's .env.
+#
+# Each service reads its own .env (copy .env.example -> .env). Values under `environment:` win over the
+# .env file, so the addresses below are always the in-network ones even if .env still says localhost.
+
+name: smart-allocate
+
+x-common-env: &common-env
+  NODE_ENV: ${NODE_ENV:-production}
+  REDIS_HOST: redis
+  REDIS_PORT: "6379"
+  REDIS_URL: redis://redis:6379
+  AUTH_SERVICE_URL: http://auth:8000
+  NGO_SERVICE_URL: http://ngo:8001
+  RES_SERVICE_URL: http://res:8002
+  RES_MANAGE_SERVICE_URL: http://res:8002
+  # proxies in front of the Express apps: nginx = 1. Set 2 if a load balancer sits in front of nginx.
+  TRUST_PROXY_HOPS: ${TRUST_PROXY_HOPS:-1}
+
+x-bun-healthcheck: &bun-healthcheck
+  interval: 15s
+  timeout: 5s
+  retries: 5
+  start_period: 20s
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+    logging: *logging
+
+  auth:
+    build: ./auth_svc
+    image: smart-allocate/auth:latest
+    env_file: ./auth_svc/.env
+    environment:
+      <<: *common-env
+      PORT: "8000"
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      <<: *bun-healthcheck
+      test: ["CMD", "bun", "-e", "fetch('http://localhost:8000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+    restart: unless-stopped
+    logging: *logging
+
+  auth-worker:
+    build: ./auth_svc # same image as `auth` (cached), listed so compose never tries to pull it
+    image: smart-allocate/auth:latest
+    command: ["bun", "workers.ts"]
+    env_file: ./auth_svc/.env
+    environment:
+      <<: *common-env
+    depends_on:
+      auth:
+        condition: service_healthy
+    restart: unless-stopped
+    logging: *logging
+
+  ngo:
+    build: ./ngo_svc
+    image: smart-allocate/ngo:latest
+    env_file: ./ngo_svc/.env
+    environment:
+      <<: *common-env
+      PORT: "8001"
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      <<: *bun-healthcheck
+      test: ["CMD", "bun", "-e", "fetch('http://localhost:8001/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+    restart: unless-stopped
+    logging: *logging
+
+  ngo-worker:
+    build: ./ngo_svc # same image as `ngo` (cached), listed so compose never tries to pull it
+    image: smart-allocate/ngo:latest
+    command: ["bun", "workers.ts"]
+    env_file: ./ngo_svc/.env
+    environment:
+      <<: *common-env
+    depends_on:
+      ngo:
+        condition: service_healthy
+    restart: unless-stopped
+    logging: *logging
+
+  res:
+    build: ./res_manage_svc
+    image: smart-allocate/res:latest
+    env_file: ./res_manage_svc/.env
+    environment:
+      <<: *common-env
+      PORT: "8002"
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      <<: *bun-healthcheck
+      test: ["CMD", "bun", "-e", "fetch('http://localhost:8002/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+    restart: unless-stopped
+    logging: *logging
+
+  alloc:
+    build: ./allocation_svc
+    image: smart-allocate/alloc:latest
+    env_file: ./allocation_svc/.env
+    environment:
+      <<: *common-env
+      PORT: "8003"
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8003/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+    logging: *logging
+
+  gateway:
+    build: ./frontend
+    image: smart-allocate/gateway:latest
+    ports:
+      - "${HTTP_PORT:-80}:80"
+    depends_on:
+      auth:
+        condition: service_healthy
+      ngo:
+        condition: service_healthy
+      res:
+        condition: service_healthy
+      alloc:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/healthz"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+    restart: unless-stopped
+    logging: *logging
+
+volumes:
+  redis-data:

@@ -6,7 +6,7 @@ import crypto from "crypto";
 import { sendEmail } from "../utils/sendEmail";
 import { OAuth2Client } from "google-auth-library";
 import { RedisKeys } from "../utils/redisKeys";
-import { safeRedis } from "../config/redis";
+import { safeRedis, redisClient } from "../config/redis";
 import axios from "axios";
 import { bulkUserDeletionQueue } from "../queues/auth.queue";
 
@@ -358,9 +358,13 @@ const userRefreshTokenController = async (req: Request, res: Response): Promise<
         const userId = decoded.userId || decoded._id;
 
         // 2. Validate Session Revocation in Redis
+        // Login/register/Google sign-in always store the active refresh token, and logout / password reset
+        // delete it. So when Redis is up, a missing entry means the session was ended: reject it.
+        // (If Redis is down we can't tell, and fall back to the JWT signature alone.)
         const storedRefreshToken = await safeRedis.get(RedisKeys.userRefreshToken(userId));
-        if (storedRefreshToken && storedRefreshToken !== refreshToken) {
-            return res.status(403).json({ message: "Session revoked or active on another device.", status: "failed" });
+        const sessionUnknown = redisClient.isOpen && storedRefreshToken === null;
+        if (sessionUnknown || (storedRefreshToken && storedRefreshToken !== refreshToken)) {
+            return res.status(403).json({ message: "Session revoked or active on another device. Please sign in again.", status: "failed" });
         }
 
         // 3. Always read the user from MongoDB here: a refresh is how a client picks up a changed

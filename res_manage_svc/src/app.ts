@@ -7,6 +7,11 @@ import reserveRouter from "./routes/reserve.routes";
 
 const app: Express = express();
 
+// See auth_svc/src/app.ts: real client IPs for the rate limiter when running behind nginx.
+if (process.env.TRUST_PROXY_HOPS) {
+    app.set("trust proxy", Number(process.env.TRUST_PROXY_HOPS));
+}
+
 app.use(helmet());
 app.use(cors());
 app.use(express.json());

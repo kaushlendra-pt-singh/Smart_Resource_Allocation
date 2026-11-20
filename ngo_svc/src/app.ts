@@ -5,6 +5,12 @@ import ngoRouter from "./routes/ngo.routes";
 import type { Request, Response } from "express";
 
 const app = express();
+
+// See auth_svc/src/app.ts: real client IPs for the rate limiter when running behind nginx.
+if (process.env.TRUST_PROXY_HOPS) {
+    app.set("trust proxy", Number(process.env.TRUST_PROXY_HOPS));
+}
+
 app.use(express.json());
 app.use(cors());
 app.use(cookieParser());

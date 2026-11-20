@@ -6,6 +6,13 @@ import type { Request, Response } from "express";
 
 const app = express();
 
+// Behind nginx (and maybe a load balancer) the client IP is in X-Forwarded-For. Without this every
+// request looks like it comes from the proxy, so the per-IP rate limiter would lump all users together.
+// TRUST_PROXY_HOPS = number of proxies in front of this service (docker-compose sets it; unset in local dev).
+if (process.env.TRUST_PROXY_HOPS) {
+    app.set("trust proxy", Number(process.env.TRUST_PROXY_HOPS));
+}
+
 app.use(express.json());
 app.use(cors({
     credentials: true

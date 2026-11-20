@@ -1,0 +1,9 @@
+﻿# never ship secrets or local installs into the image
+node_modules
+.env
+.env.*
+!.env.example
+*.log
+Dockerfile
+.dockerignore
+.git
