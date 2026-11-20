@@ -981,7 +981,55 @@ const bulkDeleteUsersController = async (req: Request, res: Response): Promise<R
     }
 };
 
+// GET /users/lookup?email=  (NGO_ADMIN / SUPER_ADMIN) -> find a user to add as an NGO member
+const lookupUserByEmailController = async (req: Request, res: Response): Promise<Response> => {
+    try {
+        const email = String(req.query.email || "").trim().toLowerCase();
+        if (!email) {
+            return res.status(400).json({ status: "failed", message: "email query parameter is required." });
+        }
+        const user = await userModel.findOne({ email }).select("_id name email isActive").lean();
+        if (!user || !user.isActive) {
+            return res.status(404).json({ status: "failed", message: "No active user with that email." });
+        }
+        return res.status(200).json({
+            status: "success",
+            user: { _id: user._id.toString(), name: user.name, email: user.email }
+        });
+    } catch (error) {
+        console.error("Error in lookupUserByEmailController:", error);
+        return res.status(500).json({ status: "failed", message: "Internal server error looking up user." });
+    }
+};
+
+// POST /users/basic { ids: [] } (any logged-in user) -> display names for member lists.
+// Emails are only included for admins.
+const getUsersBasicController = async (req: Request, res: Response): Promise<Response> => {
+    try {
+        const ids = Array.isArray(req.body?.ids) ? req.body.ids.map(String) : [];
+        const validIds = ids.filter((id: string) => /^[a-f0-9]{24}$/i.test(id)).slice(0, 200);
+        if (validIds.length === 0) {
+            return res.status(200).json({ status: "success", users: [] });
+        }
+        const showEmail = ["NGO_ADMIN", "SUPER_ADMIN"].includes(req.user?.role ?? "");
+        const users = await userModel.find({ _id: { $in: validIds } }).select("_id name email").lean();
+        return res.status(200).json({
+            status: "success",
+            users: users.map((u) => ({
+                _id: u._id.toString(),
+                name: u.name,
+                ...(showEmail ? { email: u.email } : {})
+            }))
+        });
+    } catch (error) {
+        console.error("Error in getUsersBasicController:", error);
+        return res.status(500).json({ status: "failed", message: "Internal server error fetching users." });
+    }
+};
+
 export {
+    lookupUserByEmailController,
+    getUsersBasicController,
     userRegistrationController,
     updateUserProfileController,
     promoteFounderController,

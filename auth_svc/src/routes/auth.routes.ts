@@ -16,7 +16,9 @@ import {
     addCoWorkerController,
     transferFounderRoleInternalController,
     removeNgoFromUserListInternalController,
-    cleanupDeletedNgoInternalController
+    cleanupDeletedNgoInternalController,
+    lookupUserByEmailController,
+    getUsersBasicController
 } from "../controllers/user.controller";
 import authMiddleware from "../middlewares/auth.middleware";
 import { requireRoles } from "../middlewares/role.middleware";
@@ -65,6 +67,14 @@ authRouter.patch("/reset-password/:token", rateLimiter, resetPasswordController)
 // ==========================================
 authRouter.get("/me", rateLimiter, authMiddleware, getUserProfileController);
 authRouter.delete("/delete", rateLimiter, authMiddleware, deleteUserController);
+authRouter.get(
+    "/users/lookup",
+    rateLimiter,
+    authMiddleware,
+    requireRoles(["NGO_ADMIN", "SUPER_ADMIN"]),
+    lookupUserByEmailController
+);
+authRouter.post("/users/basic", rateLimiter, authMiddleware, getUsersBasicController);
 authRouter.delete(
     "/users/bulk-delete",
     rateLimiter,
