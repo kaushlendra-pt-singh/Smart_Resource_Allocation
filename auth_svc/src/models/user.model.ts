@@ -40,7 +40,8 @@ const UserSchema: Schema = new Schema<IUser>(
     passwordHash: { type: String, required: true, select: false },
     passwordResetToken: { type: String, select: false },
     passwordResetExpires: { type: Date, select: false },
-    phone: { type: String, required: true, trim: true },
+    // Not required at schema level: Google sign-ups have no phone. /register still demands it.
+    phone: { type: String, default: "", trim: true },
     profilePic: { type: String, default: "https://cdn-icons-png.flaticon.com/512/149/149071.png", trim: true },
     role: {
       type: String,
@@ -99,10 +100,16 @@ UserSchema.methods.comparePassword = async function (password: string) {
 UserSchema.methods.generateAccessToken = function (this: IUser): string {
   return jwt.sign(
     {
-      ngoId: this.ngoId ?? "",
       _id: this._id.toString(),
       email: this.email,
-      role: this.role
+      role: this.role,
+      // ngoId = the NGO this user OWNS (registered). null if they own none.
+      ngoId: this.ngoId ? this.ngoId.toString() : null,
+      // Every NGO the user belongs to, with their role there. Admin rights per NGO come from here.
+      joinedNGOs: (this.joinedNGOs ?? []).map((j) => ({
+        ngoId: j.ngoId.toString(),
+        roleInNGO: j.roleInNGO
+      }))
     },
     process.env.JWT_ACCESS_SECRET!,
     { expiresIn: "45m" }

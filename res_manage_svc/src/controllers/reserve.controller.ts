@@ -234,19 +234,8 @@ export const cancelReservationInternal = async (req: Request, res: Response): Pr
 
         // 2. Reference-scoped guard: only release what THIS referenceId still holds on THIS inventory.
         //    Without this, a rollback/ambiguous-cancel could free another allocation's hold.
-        //    RESERVE rows are +qty and CANCEL_RESERVATION rows are -qty, so the sum is the net hold.
-        //    (If DISPATCH consumes holds in your system, include its quantity for this ref in the sum.)
-        const agg = await InventoryLedger.aggregate([
-            {
-                $match: {
-                    inventoryId: new mongoose.Types.ObjectId(inventoryId),
-                    referenceId: ref,
-                    action: { $in: ["RESERVE", "CANCEL_RESERVATION"] }
-                }
-            },
-            { $group: { _id: null, net: { $sum: "$quantity" } } }
-        ]).session(session);
-        const heldForRef = await getNetHold(inventoryId, ref, session); // now also subtracts dispatched units
+        //    RESERVE rows are +qty, CANCEL_RESERVATION and DISPATCH rows are -qty, so the sum is the net hold.
+        const heldForRef = await getNetHold(inventoryId, ref, session);
 
         if (heldForRef < quantity) {
             return await abortAndRespond(session, res, 409, {

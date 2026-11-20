@@ -8,19 +8,19 @@ from scipy.optimize import linprog
 from app.core.config import settings
 from app.core.redis import redis_client
 from app.core.db import mongo_db
+from app.core import access
 from app.utils.geo import haversine_distance
 
 logger = logging.getLogger(settings.APP_NAME)
 
 
-def has_owner_tier(warehouse_ngo_id: str, requesting_ngo_id: str, user_role: str) -> bool:
+def has_owner_tier(warehouse_ngo_id: str, user: Dict[str, Any]) -> bool:
     """
-    True if the requester may dip into the owner-protected stock (reservedQuantity).
+    True if the user may dip into the owner-protected stock (reservedQuantity) of this warehouse:
+    any admin of the NGO that owns the warehouse, or a super admin.
     Single source of truth: used by the optimizer AND sent to res_manage_svc on reserve.
     """
-    is_owner = warehouse_ngo_id == requesting_ngo_id
-    is_privileged = user_role in {"NGO_ADMIN", "SUPER_ADMIN"}
-    return (is_owner and is_privileged) or user_role == "SUPER_ADMIN"
+    return access.is_admin_of(user, warehouse_ngo_id)
 
 
 class WarehouseCandidate:
@@ -50,17 +50,17 @@ class WarehouseCandidate:
         self.available_quantity = available_quantity
         self.coordinates = coordinates
 
-    def calculate_usable_stock(self, requesting_ngo_id: str, user_role: str) -> int:
+    def calculate_usable_stock(self, user: Dict[str, Any]) -> int:
         """
         Field meanings:
         - total_quantity:     physical stock
         - allocated_quantity: units currently held by active allocations
         - reserved_quantity:  minimum stock protected for the OWNER NGO
         NGO Access Tier Rules:
-        - Owner tier (owner NGO_ADMIN / SUPER_ADMIN): total - allocated
+        - Owner tier (admin of the warehouse's NGO / SUPER_ADMIN): total - allocated
         - Everyone else: total - allocated - reserved (available_quantity)
         """
-        if has_owner_tier(self.ngo_id, requesting_ngo_id, user_role):
+        if has_owner_tier(self.ngo_id, user):
             return max(0, self.total_quantity - self.allocated_quantity)
         return max(0, self.total_quantity - self.allocated_quantity - self.reserved_quantity)
 
@@ -89,14 +89,23 @@ CACHE_TTL_SECONDS = 300  # short TTL: stock changes with every reservation
 MAX_HYDRATE = 1000  # max inventories per resource we are willing to index in Redis
 
 
-def _stock_key(wh_name: str, resource_id: str) -> str:
-    return f"stock:wh:{wh_name}:res:{resource_id}"
+# Everything is keyed by INVENTORY id: warehouse names are only unique per NGO, so two NGOs with a
+# "Main Warehouse" would overwrite each other if we keyed by name.
+# NOTE: res_manage_svc deletes _index_key(resource_id) after restock/dispatch (RedisKeys.allocationResourceIndex);
+# keep the two in sync if you rename it.
+def _stock_key(inventory_id: str) -> str:
+    return f"alloc:stock:inv:{inventory_id}"
 
 
 def _index_key(resource_id: str) -> str:
-    # Set of warehouse names that hold this resource. Only written when it is COMPLETE
+    # Set of inventory ids that hold this resource. Only written when it is COMPLETE
     # for the resource, so its existence proves the cache can be trusted.
-    return f"idx:res:{resource_id}:warehouses"
+    return f"alloc:idx:res:{resource_id}:inventories"
+
+
+def _geo_key(resource_id: str) -> str:
+    # Per-resource geo set: member = inventory id
+    return f"alloc:geo:res:{resource_id}"
 
 
 def _to_str(raw: Any) -> str:
@@ -119,13 +128,12 @@ def _dedupe(candidates: List[WarehouseCandidate]) -> List[WarehouseCandidate]:
     return unique
 
 
-async def invalidate_stock_cache(entries: List[tuple]) -> None:
+async def invalidate_stock_cache(inventory_ids: List[str]) -> None:
     """
     Drop cached stock after reservations/rollbacks.
-    entries: [(resource_id, warehouse_name), ...]
     A missing stock key makes the next lookup fall back to MongoDB and re-hydrate.
     """
-    keys = list({_stock_key(wh, rid) for rid, wh in entries})
+    keys = list({_stock_key(str(i)) for i in inventory_ids if i})
     if not keys:
         return
     try:
@@ -146,26 +154,26 @@ async def _load_candidates_from_redis(
     try:
         indexed = await redis_client.smembers(_index_key(resource_id))
         if not indexed:
-            return None  # never hydrated / expired
-        indexed_names = {_to_str(n) for n in indexed}
+            return None  # never hydrated / expired / invalidated by res_manage_svc
+        indexed_ids = {_to_str(n) for n in indexed}
 
         nearby: Any = await redis_client.geosearch(
-            "geo:warehouses",
+            _geo_key(resource_id),
             longitude=target_location[0],
             latitude=target_location[1],
             radius=radius_km,
             unit="km",
         )
-        nearby_names = {_to_str(n) for n in (nearby or [])}
+        nearby_ids = {_to_str(n) for n in (nearby or [])}
 
-        relevant = sorted(nearby_names & indexed_names)
+        relevant = sorted(nearby_ids & indexed_ids)
         if not relevant:
             return None  # let MongoDB confirm "no stock nearby"
 
-        blobs = await redis_client.mget([_stock_key(n, resource_id) for n in relevant])
+        blobs = await redis_client.mget([_stock_key(i) for i in relevant])
 
         candidates: List[WarehouseCandidate] = []
-        for wh_name, blob in zip(relevant, blobs):
+        for blob in blobs:
             if not blob:
                 return None  # expired or invalidated entry -> cache incomplete
             data = json.loads(blob)
@@ -176,7 +184,7 @@ async def _load_candidates_from_redis(
             candidates.append(
                 WarehouseCandidate(
                     inventory_id=str(data["inventoryId"]),
-                    warehouse_name=wh_name,
+                    warehouse_name=str(data["warehouseName"]),
                     ngo_id=str(data["ngoId"]),
                     resource_id=str(data["resourceId"]),
                     total_quantity=total_q,
@@ -216,11 +224,13 @@ async def _rehydrate_cache(resource_id: str, candidates: List[WarehouseCandidate
         return
     try:
         index_key = _index_key(resource_id)
-        await redis_client.delete(index_key)
+        geo_key = _geo_key(resource_id)
+        await redis_client.delete(index_key, geo_key)
         for c in candidates:
             payload = json.dumps(
                 {
                     "inventoryId": c.inventory_id,
+                    "warehouseName": c.warehouse_name,
                     "ngoId": c.ngo_id,
                     "resourceId": resource_id,
                     "totalQuantity": c.total_quantity,
@@ -230,14 +240,11 @@ async def _rehydrate_cache(resource_id: str, candidates: List[WarehouseCandidate
                     "location": {"coordinates": c.coordinates},
                 }
             )
-            await redis_client.set(
-                _stock_key(c.warehouse_name, resource_id), payload, ex=CACHE_TTL_SECONDS
-            )
-            await redis_client.geoadd(
-                "geo:warehouses", (c.coordinates[0], c.coordinates[1], c.warehouse_name)
-            )
-            await redis_client.sadd(index_key, c.warehouse_name)
+            await redis_client.set(_stock_key(c.inventory_id), payload, ex=CACHE_TTL_SECONDS)
+            await redis_client.geoadd(geo_key, (c.coordinates[0], c.coordinates[1], c.inventory_id))
+            await redis_client.sadd(index_key, c.inventory_id)
         await redis_client.expire(index_key, CACHE_TTL_SECONDS)
+        await redis_client.expire(geo_key, CACHE_TTL_SECONDS)
     except Exception as cache_err:
         logger.warning(f"[optimizer] Failed to re-hydrate Redis cache: {cache_err}")
 
@@ -320,7 +327,7 @@ class SpatialOptimizer:
         target_location: Optional[List[float]],
         candidates: List[WarehouseCandidate],
         preferred_warehouse_name: Optional[str] = None,
-        user_role: str="USER",
+        user: Optional[Dict[str, Any]] = None,
         allow_partial_fulfillment: bool = False
     ) -> OptimizationResult:
         """
@@ -338,7 +345,7 @@ class SpatialOptimizer:
         # 1. Filter out candidates with 0 usable stock
         usable_candidates: List[Dict[str, Any]] = []
         for c in candidates:
-            usable_qty = c.calculate_usable_stock(requesting_ngo_id, user_role=user_role)
+            usable_qty = c.calculate_usable_stock(user or {})
             if usable_qty > 0:
                 dist = (
                     haversine_distance(target_location, c.coordinates)

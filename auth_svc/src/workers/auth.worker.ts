@@ -24,18 +24,23 @@ export const bulkUserDeletionWorker = new Worker(
                 // 1. Cascade cleanup call to ngo_svc to strip user from memberships/admin roles
                 try {
                     await axios.delete(
-                        `${process.env.NGO_SERVICE_URL}/internal/users/${userId}/cleanup`,
-                        { headers: { "x-interservice-token": process.env.INTERNAL_API_KEY } }
+                        `${process.env.NGO_SERVICE_URL}/api/ngo/internal/users/${userId}/cleanup`,
+                        { headers: { "x-internal-key": process.env.INTERNAL_API_KEY }, timeout: 8000 }
                     );
                 } catch (ngoErr: any) {
-                    console.error(`[Worker] Failed to cascade delete user ${userId} in ngo_svc:`, ngoErr.message);
+                    // ngo_svc refuses to delete an NGO founder: skip that user instead of orphaning the NGO
+                    console.error(
+                        `[Worker] Skipping user ${userId}: ngo_svc cleanup failed:`,
+                        ngoErr.response?.data?.message || ngoErr.message
+                    );
+                    continue;
                 }
 
                 // 2. Remove user from MongoDB
                 await userModel.findByIdAndDelete(userId);
 
                 // 3. Purge user cache from Redis
-                await safeRedis.del(RedisKeys.userProfile(userId));
+                await safeRedis.del([RedisKeys.userProfile(userId), RedisKeys.userRefreshToken(userId)]);
                 deletedCount++;
 
             } catch (err) {

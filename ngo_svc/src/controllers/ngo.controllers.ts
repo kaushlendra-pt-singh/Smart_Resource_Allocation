@@ -1,4 +1,5 @@
 import ngoModel from "../models/ngo.model";
+import mongoose from "mongoose";
 import type { Request, Response } from "express";
 import { v2 as cloudinary } from "cloudinary";
 import { safeRedis } from "../config/redis";
@@ -342,6 +343,9 @@ export const addMemberController = async (req: Request, res: Response): Promise<
             if (roleInNGO !== "NGO_ADMIN" && isAlreadyWorker) {
                 return `User is already registered as ${roleInNGO}.`;
             }
+            if (roleInNGO !== "NGO_ADMIN" && String((ngoDoc as any).adminId) === targetUserIdStr) {
+                return "The NGO owner cannot be demoted. Transfer ownership first.";
+            }
 
             return null;
         };
@@ -479,11 +483,14 @@ export const listNgosController = async (req: Request, res: Response): Promise<R
         const skip = (page - 1) * limit;
 
         const { search, status } = req.query;
-        const isAdmin = req.user?.role === "SUPER_ADMIN" || req.user?.role === "NGO_ADMIN";
+        // Only a SUPER_ADMIN may list PENDING/REJECTED NGOs (an NGO_ADMIN must not see other NGOs' applications)
+        const isSuperAdmin = req.user?.role === "SUPER_ADMIN";
+        const allowedStatuses = ["PENDING", "APPROVED", "REJECTED"];
 
-        // Security Guard: Public users are strictly locked to APPROVED
+        // Security Guard: everyone else is strictly locked to APPROVED
         const filter: Record<string, any> = {
-            verificationStatus: (isAdmin && status) ? status : "APPROVED"
+            verificationStatus:
+                isSuperAdmin && typeof status === "string" && allowedStatuses.includes(status) ? status : "APPROVED"
         };
 
         if (search) {
@@ -668,10 +675,18 @@ export const updateNgoProfileController = async (req: Request, res: Response): P
             ngoDoc.name = name.trim();
         }
 
+        const hasNewCoords = !!location && Array.isArray(location.coordinates);
+        if (hasNewCoords && !isValidCoordinates(location.coordinates)) {
+            return res.status(400).json({
+                status: "failed",
+                message: "Invalid coordinates. Must be [longitude, latitude]."
+            });
+        }
+
         if (location) {
             // Ensure GeoJSON format compliance
             if (location.address) ngoDoc.location.address = location.address;
-            if (location.coordinates && Array.isArray(location.coordinates)) {
+            if (hasNewCoords) {
                 ngoDoc.location.coordinates = location.coordinates; // [longitude, latitude]
             }
         }
@@ -688,12 +703,15 @@ export const updateNgoProfileController = async (req: Request, res: Response): P
             JSON.stringify(updatedNgoObj),
             { EX: 86400 } // 24 hours TTL
         );
-        // Redis GEOADD expects: key, longitude, latitude, member_id
-        await safeRedis.geoAdd("ngo:locations",
-            location.coordinates[0],
-            location.coordinates[1],
-            ngoId.toString()
-        );
+        // Only approved NGOs live in the geo index; only re-index when coordinates actually changed
+        if (hasNewCoords && ngoDoc.verificationStatus === "APPROVED") {
+            await safeRedis.geoAdd(
+                RedisKeys.ngoLocations(),
+                ngoDoc.location.coordinates[0],
+                ngoDoc.location.coordinates[1],
+                ngoId.toString()
+            );
+        }
 
         return res.status(200).json({
             status: "success",
@@ -746,30 +764,40 @@ export const transferOwnershipController = async (req: Request, res: Response): 
         }
 
         const oldAdminId = ngoDoc.adminId.toString();
+        const newAdminIdStr = String(newAdminId);
 
-        // 3. Update primary founder in MongoDB
-        ngoDoc.adminId = newAdminId;
-
-        // Ensure the new admin is also present in the ngoAdmins array
-        const isAlreadyInAdmins = ngoDoc.ngoAdmins.some(id => id.toString() === newAdminId);
-        if (!isAlreadyInAdmins) {
-            ngoDoc.ngoAdmins.push(newAdminId);
+        if (!mongoose.Types.ObjectId.isValid(newAdminIdStr)) {
+            return res.status(400).json({ status: "failed", message: "Invalid newAdminId." });
+        }
+        if (newAdminIdStr === oldAdminId) {
+            return res.status(400).json({ status: "failed", message: "This user already owns the NGO." });
+        }
+        if (ngoDoc.verificationStatus !== "APPROVED") {
+            return res.status(400).json({ status: "failed", message: "Only an approved NGO can be transferred." });
         }
 
-        // 4. Interservice Call to auth_svc to promote new owner & adjust old owner's global role
+        // 3. Interservice Call to auth_svc FIRST: new owner gets ngoId + admin membership,
+        //    previous owner loses ngoId (stays an admin member). Nothing is saved here if it fails.
         try {
             await axios.post(
-                `${process.env.AUTH_SERVICE_URL}/api/auth/internal/users/promote-founder`,
-                { userId: newAdminId, ngoId },
-                { headers: { "x-internal-key": process.env.INTERNAL_API_KEY } }
+                `${process.env.AUTH_SERVICE_URL}/api/auth/internal/users/transfer-founder`,
+                { previousAdminId: oldAdminId, newAdminId: newAdminIdStr, ngoId: ngoDoc._id.toString() },
+                { headers: { "x-internal-key": process.env.INTERNAL_API_KEY }, timeout: 8000 }
             );
         } catch (authError: any) {
             console.error("Interservice error sync with auth_svc:", authError.response?.data || authError.message);
-            return res.status(502).json({
+            return res.status(authError.response?.status === 404 ? 404 : 502).json({
                 status: "failed",
-                message: "Failed to synchronize member removal with authentication service. Operation aborted."
+                message: authError.response?.data?.message || "Failed to synchronize ownership transfer with authentication service. Operation aborted."
             });
         }
+
+        // 4. Update owner in MongoDB; the new owner is an admin (and no longer a worker)
+        ngoDoc.adminId = newAdminIdStr as any;
+        if (!ngoDoc.ngoAdmins.some(id => id.toString() === newAdminIdStr)) {
+            ngoDoc.ngoAdmins.push(newAdminIdStr as any);
+        }
+        ngoDoc.ngoWorkers = ngoDoc.ngoWorkers.filter(id => id.toString() !== newAdminIdStr);
 
         await ngoDoc.save();
 
@@ -786,7 +814,7 @@ export const transferOwnershipController = async (req: Request, res: Response): 
             message: "NGO primary ownership transferred successfully.",
             data: {
                 previousAdminId: oldAdminId,
-                newAdminId: newAdminId
+                newAdminId: newAdminIdStr
             }
         });
 
@@ -930,9 +958,12 @@ export const deleteNgoController = async (req: Request, res: Response): Promise<
         // 4. Delete document from MongoDB
         await ngoModel.findByIdAndDelete(ngoId);
 
-        // 5. Purge Redis Cache
-        const cacheKey = RedisKeys.ngoDetails(ngoId.toString());
-        await safeRedis.del(cacheKey);
+        // 5. Purge Redis Cache (details, geo index, pending counter)
+        await safeRedis.del(RedisKeys.ngoDetails(ngoId.toString()));
+        await safeRedis.zrem(RedisKeys.ngoLocations(), ngoId.toString());
+        if (ngoDoc.verificationStatus === "PENDING") {
+            await safeRedis.decr(RedisKeys.pendingNgoCount());
+        }
 
         return res.status(200).json({
             status: "success",

@@ -26,7 +26,8 @@ invenRouter.post(
     "/dispatch",
     rateLimiter,
     authMiddleWare,
-    requireRoles(["SUPER_ADMIN", "NGO_ADMIN", "NGO_WORKER", "VOLUNTEER"]),
+    // per-NGO check (admin/worker of the owning NGO) happens in the controller
+    requireRoles(["SUPER_ADMIN", "NGO_ADMIN", "NGO_WORKER"]),
     dispatchInventory
 );
 

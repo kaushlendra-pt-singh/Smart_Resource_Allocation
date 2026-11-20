@@ -6,7 +6,7 @@ import { InventoryLedger } from "../models/ledger.model";
 import { Resource } from "../models/resource.model";
 import { safeRedis } from "../config/redis";
 import { RedisKeys } from "../utils/redisKeys";
-import { isValidCoordinates } from "../utils/validateCords";
+import { isAdminOf } from "../utils/access";
 // Keep your existing imports: Request, Response, mongoose, Inventory, InventoryLedger, safeRedis, RedisKeys
 //
 // Route suggestion (behind your normal JWT auth, NOT the internal key):
@@ -56,10 +56,8 @@ export const setOwnerReserve = async (req: Request, res: Response): Promise<Resp
             return await reply(404, { status: "failed", message: `Inventory ${id} not found.` });
         }
 
-        // 2. Authorization: SUPER_ADMIN, or NGO_ADMIN of the owning NGO
-        const isSuperAdmin = user?.role === "SUPER_ADMIN";
-        const isOwnerAdmin = user?.role === "NGO_ADMIN" && user?.ngoId === inventory.ngoId;
-        if (!isSuperAdmin && !isOwnerAdmin) {
+        // 2. Authorization: SUPER_ADMIN, or any admin of the owning NGO
+        if (!isAdminOf(user, inventory.ngoId)) {
             return await reply(403, {
                 status: "failed",
                 message: "Only the owning NGO admin or a super admin can change the owner reserve."
@@ -117,7 +115,8 @@ export const setOwnerReserve = async (req: Request, res: Response): Promise<Resp
             });
             await Promise.all([
                 safeRedis.set(RedisKeys.inventoryStock(idStr), payload, { EX: 86400 }),
-                safeRedis.set(RedisKeys.warehouseResourceStock(updated.warehouseName, updated.resourceId.toString()), payload, { EX: 86400 })
+                safeRedis.set(RedisKeys.warehouseResourceStock(updated.warehouseName, updated.resourceId.toString()), payload, { EX: 86400 }),
+                safeRedis.del(RedisKeys.allocationResourceIndex(updated.resourceId.toString()))
             ]);
         } catch (err) {
             console.error("Redis sync failed after owner-reserve update:", err);

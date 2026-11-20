@@ -1,6 +1,11 @@
 import { bulkUserDeletionWorker } from "./src/workers/auth.worker";
-import { redisClient } from "./src/config/redis";
+import { redisClient, connectRedis } from "./src/config/redis";
+import connectToDB from "./src/config/db";
 import mongoose from "mongoose";
+
+// Jobs touch MongoDB and the Redis cache client, so both must be connected (bun auto-loads .env)
+await connectToDB();
+await connectRedis();
 
 console.log("⚡ Background Worker Service started...");
 let isShuttingDown = false;

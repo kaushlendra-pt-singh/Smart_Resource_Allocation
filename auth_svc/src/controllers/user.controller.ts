@@ -13,6 +13,53 @@ import { bulkUserDeletionQueue } from "../queues/auth.queue";
 
 const client = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
+const PROFILE_TTL = 24 * 60 * 60;
+
+// Single shape for the user profile: used for API responses AND the Redis profile cache,
+// so every reader (auth middleware, /me, refresh) sees the same fields. Never includes secrets.
+const toUserPayload = (user: any) => ({
+    _id: user._id.toString(),
+    name: user.name,
+    email: user.email,
+    phone: user.phone || null,
+    role: user.role,
+    profilePic: user.profilePic,
+    ngoId: user.ngoId ? user.ngoId.toString() : null, // the NGO this user owns
+    joinedNGOs: (user.joinedNGOs ?? []).map((j: any) => ({
+        ngoId: j.ngoId.toString(),
+        roleInNGO: j.roleInNGO
+    })),
+    verificationStatus: user.verificationStatus,
+    isActive: user.isActive,
+    isGoogleUser: user.isGoogleUser,
+    createdAt: user.createdAt,
+    updatedAt: user.updatedAt
+});
+
+const cacheUserProfile = async (user: any) => {
+    await safeRedis.set(
+        RedisKeys.userProfile(user._id.toString()),
+        JSON.stringify(toUserPayload(user)),
+        { EX: PROFILE_TTL }
+    );
+};
+
+// Global role derived from memberships (SUPER_ADMIN is never touched).
+const recalcGlobalRole = (user: any) => {
+    if (user.role === "SUPER_ADMIN") return;
+    const roles = (user.joinedNGOs ?? []).map((j: any) => j.roleInNGO);
+    if (roles.includes("NGO_ADMIN")) user.role = "NGO_ADMIN";
+    else if (roles.includes("NGO_WORKER")) user.role = "NGO_WORKER";
+    else if (roles.includes("VOLUNTEER")) user.role = "VOLUNTEER";
+    else user.role = "RESIDENT";
+};
+
+const setMembership = (user: any, ngoId: string, roleInNGO: string) => {
+    const idx = user.joinedNGOs.findIndex((j: any) => j.ngoId.toString() === ngoId.toString());
+    if (idx !== -1) user.joinedNGOs[idx].roleInNGO = roleInNGO;
+    else user.joinedNGOs.push({ ngoId, roleInNGO });
+};
+
 //Phone number in google auth, otp verification, avatar/dp are not implemented yet.
 //No user role safety implemented yet. Create a otp or email check route for verification.
 //No refresh token rotation yet implemented.
@@ -62,26 +109,17 @@ const userRegistrationController = async (req: Request, res: Response): Promise<
             joinedNGOs: []
         });
 
-        const userPayload = {
-            _id: user._id.toString(),
-            name: user.name,
-            email: user.email,
-            phone: user.phone || null,
-            role: user.role,
-            joinedNGOs: user.joinedNGOs ?? [],
-            verificationStatus: user.verificationStatus, // Dynamic, not hardcoded
-            isActive: user.isActive,
-            isGoogleUser: user.isGoogleUser,
-            createdAt: user.createdAt
-        };
+        const userPayload = toUserPayload(user);
 
         // 4. Cache user profile in Redis
-        await safeRedis.set(emailKey, JSON.stringify({ _id: user._id, email: user.email }), { EX: 24 * 60 * 60 });
-        await safeRedis.set(RedisKeys.userProfile(user._id.toString()), JSON.stringify(userPayload), { EX: 24 * 60 * 60 });
+        await safeRedis.set(emailKey, JSON.stringify({ _id: user._id, email: user.email }), { EX: PROFILE_TTL });
+        await cacheUserProfile(user);
 
         // 5. Generate Tokens & Response
         const accessToken = user.generateAccessToken();
         const refreshToken = user.generateRefreshToken();
+        // Register the session so /refresh-token and the auth middleware accept it (same as login)
+        await safeRedis.set(RedisKeys.userRefreshToken(userPayload._id), refreshToken, { EX: 7 * 24 * 60 * 60 });
 
         const cookieOptions = {
             httpOnly: true,
@@ -150,27 +188,10 @@ const updateUserProfileController = async (req: Request, res: Response): Promise
         }
 
         // 3. Construct updated user payload
-        const userPayload = {
-            _id: updatedUser._id.toString(),
-            name: updatedUser.name,
-            email: updatedUser.email,
-            phone: updatedUser.phone || null,
-            role: updatedUser.role,
-            profilePic: updatedUser.profilePic,
-            joinedNGOs: updatedUser.joinedNGOs ?? [],
-            verificationStatus: updatedUser.verificationStatus,
-            isActive: updatedUser.isActive,
-            isGoogleUser: updatedUser.isGoogleUser,
-            createdAt: updatedUser.createdAt,
-            updatedAt: updatedUser.updatedAt
-        };
+        const userPayload = toUserPayload(updatedUser);
 
-        // 4. Invalidate & refresh Redis profile cache
-        await safeRedis.set(
-            RedisKeys.userProfile(userId),
-            JSON.stringify(userPayload),
-            { EX: 24 * 60 * 60 }
-        );
+        // 4. Refresh Redis profile cache
+        await cacheUserProfile(updatedUser);
 
         return res.status(200).json({
             status: "success",
@@ -208,36 +229,22 @@ const promoteFounderController = async (req: Request, res: Response): Promise<Re
             });
         }
 
-        // 3. Promote Role & Link NGO
-        user.role = "NGO_ADMIN";
-
-        const alreadyJoined = user.joinedNGOs?.some(
-            (item: any) => item.ngoId.toString() === ngoId.toString()
-        );
-        if (!alreadyJoined) {
-            user.joinedNGOs.push({ ngoId, roleInNGO: "NGO_ADMIN" });
+        // 3. Link NGO: the founder OWNS it (ngoId) and is an admin member of it (joinedNGOs)
+        if (!user.ngoId) {
+            user.ngoId = ngoId;
         }
+        setMembership(user, ngoId, "NGO_ADMIN");
+        recalcGlobalRole(user);
 
         await user.save({ validateBeforeSave: false });
 
-        // 3. Redis Invalidation & Sync
-        const userCacheKey = RedisKeys.userProfile(userId.toString());
-
-        // Remove stale user cache so next read fetches fresh role data
-        await safeRedis.del(userCacheKey);
-
-        // Optional: Cache updated profile immediately (Write-Through strategy)
-        const updatedUserObj = user.toObject();
-
-        await safeRedis.set(
-            userCacheKey,
-            JSON.stringify(updatedUserObj),
-            { EX: 86400 } // 24 hours TTL
-        );
+        // 4. Write-through profile cache so the next token refresh carries ngoId + joinedNGOs
+        await cacheUserProfile(user);
 
         return res.status(200).json({
             status: "success",
-            message: "Founder successfully promoted to NGO_ADMIN and linked to NGO."
+            message: "Founder successfully promoted to NGO_ADMIN and linked to NGO.",
+            user: toUserPayload(user)
         });
 
     } catch (error: any) {
@@ -268,14 +275,11 @@ const promoteCoAdminController = async (req: Request, res: Response): Promise<Re
         }
 
         // 3. Update Role & Link NGO
-        user.role = "NGO_ADMIN";
-
-        const alreadyJoined = user.joinedNGOs.some(id => id.toString() === ngoId.toString());
-        if (!alreadyJoined) {
-            user.joinedNGOs.push(ngoId);
-        }
+        setMembership(user, ngoId, "NGO_ADMIN");
+        recalcGlobalRole(user);
 
         await user.save({ validateBeforeSave: false });
+        await cacheUserProfile(user);
 
         return res.status(200).json({
             status: "success",
@@ -307,48 +311,15 @@ const addCoWorkerController = async (req: Request, res: Response): Promise<Respo
         }
 
         // 2. Update or Add NGO Membership Subdocument
-        const existingNGOIndex = user.joinedNGOs.findIndex(
-            (item) => item.ngoId.toString() === ngoId.toString()
-        );
+        setMembership(user, ngoId, roleInNGO);
 
-        if (existingNGOIndex !== -1) {
-            user.joinedNGOs[existingNGOIndex]!.roleInNGO = roleInNGO;
-        } else {
-            user.joinedNGOs.push({ ngoId, roleInNGO });
-        }
-
-        // 3. Smart Global Role Calculation (Handles Promotions & Demotions)
-        if (user.role !== "SUPER_ADMIN") {
-            const hasAnyAdminRole = user.joinedNGOs.some(
-                (item) => item.roleInNGO === "NGO_ADMIN"
-            );
-
-            if (hasAnyAdminRole) {
-                user.role = "NGO_ADMIN";
-            } else {
-                // If demoted from Admin in this NGO and has no other Admin roles, fallback to roleInNGO
-                user.role = roleInNGO;
-            }
-        }
+        // 3. Global role from ALL memberships (handles promotions & demotions)
+        recalcGlobalRole(user);
 
         await user.save();
 
-        // 4. Redis Cache Management (Invalidate + Write-Through)
-        const userCacheKey = RedisKeys.userProfile
-            ? RedisKeys.userProfile(user._id.toString())
-            : `user:profile:${user._id.toString()}`;
-
-        // Invalidate stale profile
-        await safeRedis.del(userCacheKey);
-
-        // Optional: Pre-populate updated profile without sensitive data
-        const updatedUserObj = user.toObject();
-
-        await safeRedis.set(
-            userCacheKey,
-            JSON.stringify(updatedUserObj),
-            { EX: 86400 } // 24 Hours TTL
-        );
+        // 4. Write-through profile cache
+        await cacheUserProfile(user);
 
         return res.status(200).json({
             status: "success",
@@ -392,55 +363,27 @@ const userRefreshTokenController = async (req: Request, res: Response): Promise<
             return res.status(403).json({ message: "Session revoked or active on another device.", status: "failed" });
         }
 
-        // 3. Fast Path: Read cached user profile from Redis first
-        let user: any = null;
-        const cachedProfile = await safeRedis.get(RedisKeys.userProfile(userId));
-
-        if (cachedProfile) {
-            user = JSON.parse(cachedProfile);
-        } else {
-            // Cache Miss: Fall back to MongoDB
-            const dbUser = await userModel.findById(userId);
-            if (!dbUser) {
-                return res.status(404).json({ message: "No user found!", status: "failed" });
-            }
-
-            user = {
-                _id: user._id.toString(),
-                name: user.name,
-                email: user.email,
-                phone: user.phone || null,
-                role: user.role,
-                joinedNGOs: user.joinedNGOs ?? [],
-                verificationStatus: user.verificationStatus, // Dynamic, not hardcoded
-                isActive: user.isActive,
-                isGoogleUser: user.isGoogleUser,
-                createdAt: user.createdAt
-            };
-
-            // Repopulate Cache
-            await safeRedis.set(RedisKeys.userProfile(userId), JSON.stringify(user), { EX: 24 * 60 * 60 });
+        // 3. Always read the user from MongoDB here: a refresh is how a client picks up a changed
+        //    role / ngoId / joinedNGOs (e.g. right after its NGO got approved), so it must not be stale.
+        const dbUser = await userModel.findById(userId);
+        if (!dbUser) {
+            return res.status(404).json({ message: "No user found!", status: "failed" });
         }
 
         // 4. Check status
-        if (!user.isActive) {
+        if (!dbUser.isActive) {
             return res.status(403).json({ message: "This account has been suspended!", status: "failed" });
         }
 
-        // 5. Generate lean Access Token
-        const newAccessToken = jwt.sign(
-            {
-                _id: user._id,
-                email: user.email,
-                role: user.role
-            },
-            process.env.JWT_ACCESS_SECRET!,
-            { expiresIn: "45m" }
-        );
+        await cacheUserProfile(dbUser);
+
+        // 5. Same token shape as login (includes ngoId + joinedNGOs)
+        const newAccessToken = dbUser.generateAccessToken();
 
         return res.status(200).json({
             status: "success",
-            accessToken: newAccessToken
+            accessToken: newAccessToken,
+            user: toUserPayload(dbUser)
         });
 
     } catch (error) {
@@ -474,21 +417,10 @@ const userLoginController = async (req: Request, res: Response): Promise<Respons
         }
 
         // 3. Prepare Safe User Profile Payload (EXCLUDING passwordHash)
-        const userPayload = {
-            _id: user._id.toString(),
-            name: user.name,
-            email: user.email,
-            phone: user.phone || null,
-            role: user.role,
-            joinedNGOs: user.joinedNGOs ?? [],
-            verificationStatus: user.verificationStatus, // Dynamic, not hardcoded
-            isActive: user.isActive,
-            isGoogleUser: user.isGoogleUser,
-            createdAt: user.createdAt
-        };
+        const userPayload = toUserPayload(user);
 
         // 4. Cache User Profile & Refresh Token Session in Redis
-        await safeRedis.set(RedisKeys.userProfile(userPayload._id), JSON.stringify(userPayload), { EX: 24 * 60 * 60 });
+        await cacheUserProfile(user);
         await safeRedis.set(RedisKeys.userByEmail(normalizedEmail), JSON.stringify({ _id: userPayload._id, email: userPayload.email }), { EX: 24 * 60 * 60 });
 
         // 5. Generate Tokens
@@ -523,7 +455,17 @@ const userLoginController = async (req: Request, res: Response): Promise<Respons
 const userLogoutController = async (req: Request, res: Response): Promise<Response> => {
 
     try {
-        const userId = req.user?._id;
+        // /logout has no auth middleware (the access token may already be expired),
+        // so identify the session from the refresh cookie as a fallback.
+        let userId: any = req.user?._id;
+        if (!userId && req.cookies?.refreshToken) {
+            try {
+                const decoded: any = jwt.verify(req.cookies.refreshToken, process.env.JWT_REFRESH_SECRET!);
+                userId = decoded.userId || decoded._id;
+            } catch {
+                // invalid/expired cookie: nothing to revoke server-side
+            }
+        }
 
         if (userId) {
             const userIdStr = userId.toString();
@@ -576,21 +518,7 @@ const getUserProfileController = async (req: Request, res: Response): Promise<Re
                 return res.status(403).json({ message: "Account has been suspended.", status: "failed" });
             }
 
-            return res.status(200).json({
-                status: "success",
-                user: {
-                    _id: userRedis._id.toString(),
-                    name: userRedis.name,
-                    email: userRedis.email,
-                    phone: userRedis.phone || null,
-                    role: userRedis.role,
-                    joinedNGOs: userRedis.joinedNGOs ?? [],
-                    verificationStatus: userRedis.verificationStatus, // Dynamic, not hardcoded
-                    isActive: userRedis.isActive,
-                    isGoogleUser: userRedis.isGoogleUser,
-                    createdAt: userRedis.createdAt
-                }
-            });
+            return res.status(200).json({ status: "success", user: userRedis });
         }
 
         // 3. Cache Miss: Fetch from MongoDB
@@ -604,19 +532,10 @@ const getUserProfileController = async (req: Request, res: Response): Promise<Re
             return res.status(403).json({ message: "Account has been suspended.", status: "failed" });
         }
 
-        const userPayload = {
-            _id: user._id.toString(),
-            name: user.name,
-            email: user.email,
-            phone: user.phone,
-            role: user.role,
-            joinedNGOs: user.joinedNGOs ?? [],
-            verificationStatus: user.verificationStatus,
-            isActive: user.isActive
-        };
+        const userPayload = toUserPayload(user);
 
-        // 4. Repopulate Redis Cache (TTL: 7 days to match login session)
-        await safeRedis.set(userKey, JSON.stringify(userPayload), { EX: 24 * 60 * 60 });
+        // 4. Repopulate Redis Cache
+        await cacheUserProfile(user);
 
         // 5. Return profile payload
         return res.status(200).json({
@@ -755,7 +674,7 @@ const deleteUserController = async (req: Request, res: Response): Promise<Respon
         // 1. Interservice Call to ngo_svc to scrub NGO memberships
         try {
             await axios.delete(
-                `${process.env.NGO_SERVICE_URL}/internal/users/${userIdStr}/cleanup`,
+                `${process.env.NGO_SERVICE_URL}/api/ngo/internal/users/${userIdStr}/cleanup`,
                 {
                     headers: { "x-internal-key": process.env.INTERNAL_API_KEY },
                     timeout: 8000
@@ -818,9 +737,10 @@ const googleAuthController = async (req: Request, res: Response): Promise<Respon
         const { email, name, picture } = payload;
 
         // 2. Check if the user already exists in your DB
-        let user = await userModel.findOne({ email });
-        if (!user?.isActive) {
-            return res.status(400).json({ status: "failed", message: "The user is active no more or id is banned." });
+        let user = await userModel.findOne({ email: email.toLowerCase() });
+        // Only an EXISTING suspended account is rejected; a missing account is created below.
+        if (user && !user.isActive) {
+            return res.status(403).json({ status: "failed", message: "The user is active no more or id is banned." });
         }
 
         if (!user) {
@@ -829,11 +749,12 @@ const googleAuthController = async (req: Request, res: Response): Promise<Respon
             const randomPassword = crypto.randomBytes(16).toString("hex");
 
             user = await userModel.create({
-                name,
-                email,
+                name: name || email.split("@")[0],
+                email: email.toLowerCase(),
                 passwordHash: randomPassword,
                 role: "RESIDENT", // Default fallback role
                 ngoId: null,
+                profilePic: picture || undefined,
                 isGoogleUser: true
             });
         }
@@ -844,15 +765,7 @@ const googleAuthController = async (req: Request, res: Response): Promise<Respon
 
         const userIdStr = user._id.toString();
 
-        const userPayload = {
-            _id: user._id.toString(),
-            email: user.email,
-            name: user.name,
-            role: user.role,
-            phone: user.phone,
-            joinedNGOs: user.joinedNGOs ?? [], // Optional chaining / Nullish coalescing
-            verificationStatus: 'APPROVED'
-        };
+        const userPayload = toUserPayload(user);
 
         // Store in Redis matching your project's data schema and TTL patterns
         await Promise.all([
@@ -918,47 +831,27 @@ const transferFounderRoleInternalController = async (req: Request, res: Response
             return res.status(404).json({ status: "failed", message: "New admin user account not found." });
         }
 
-        if (newAdmin.role !== "SUPER_ADMIN") {
-            newAdmin.role = "NGO_ADMIN";
+        // New owner: owns this NGO (if they don't own one already) and is an admin member of it
+        if (!newAdmin.ngoId) {
+            newAdmin.ngoId = ngoId;
         }
-
-        const newAdminNgoIndex = newAdmin.joinedNGOs.findIndex(
-            (item) => item.ngoId.toString() === ngoId.toString()
-        );
-
-        if (newAdminNgoIndex !== -1) {
-            newAdmin.joinedNGOs[newAdminNgoIndex]!.roleInNGO = "NGO_ADMIN";
-        } else {
-            newAdmin.joinedNGOs.push({ ngoId, roleInNGO: "NGO_ADMIN" });
-        }
+        setMembership(newAdmin, ngoId, "NGO_ADMIN");
+        recalcGlobalRole(newAdmin);
 
         await newAdmin.save();
+        await cacheUserProfile(newAdmin);
 
-        // 2. Recalculate Previous Admin's Global Role
+        // 2. Previous owner: no longer owns it, but stays an admin member of it
+        //    (the new owner can remove them later via member removal).
         const previousAdmin = await userModel.findById(previousAdminId);
         if (previousAdmin) {
-            // Check if they manage any other NGOs as an admin
-            const hasOtherAdminRoles = previousAdmin.joinedNGOs.some(
-                (item) => item.ngoId.toString() !== ngoId.toString() && item.roleInNGO === "NGO_ADMIN"
-            );
-
-            // If not a Super Admin and manages no other NGOs, demote global role
-            if (previousAdmin.role !== "SUPER_ADMIN" && !hasOtherAdminRoles) {
-                // Find remaining role in this NGO or fallback to NGO_WORKER
-                const currentNgoMembership = previousAdmin.joinedNGOs.find(
-                    (item) => item.ngoId.toString() === ngoId.toString()
-                );
-                previousAdmin.role = currentNgoMembership?.roleInNGO || "NGO_WORKER";
+            if (previousAdmin.ngoId?.toString() === ngoId.toString()) {
+                previousAdmin.ngoId = null;
             }
-
+            recalcGlobalRole(previousAdmin);
             await previousAdmin.save();
-
-            // Clear previous admin cache
-            await safeRedis.del(RedisKeys.userProfile(previousAdminId.toString()));
+            await cacheUserProfile(previousAdmin);
         }
-
-        // 3. Invalidate Redis Cache for New Admin
-        await safeRedis.del(RedisKeys.userProfile(newAdminId.toString()));
 
         return res.status(200).json({
             status: "success",
@@ -988,22 +881,17 @@ const removeNgoFromUserListInternalController = async (req: Request, res: Respon
             (item) => item.ngoId.toString() !== ngoId.toString()
         );
 
-        // 2. Recalculate global role (Demote if no admin roles remain)
-        if (user.role !== "SUPER_ADMIN") {
-            const isStillAdminElsewhere = user.joinedNGOs.some(
-                (item) => item.roleInNGO === "NGO_ADMIN"
-            );
-
-            if (!isStillAdminElsewhere) {
-                // Set to NGO_WORKER or USER depending on remaining memberships
-                user.role = user.joinedNGOs.length > 0 ? "NGO_WORKER" : "RESIDENT";
-            }
+        if (user.ngoId?.toString() === ngoId.toString()) {
+            user.ngoId = null;
         }
+
+        // 2. Recalculate global role from remaining memberships
+        recalcGlobalRole(user);
 
         await user.save();
 
-        // 3. Purge user profile in Redis
-        await safeRedis.del(RedisKeys.userProfile(userId.toString()));
+        // 3. Refresh user profile in Redis
+        await cacheUserProfile(user);
 
         return res.status(200).json({ status: "success", message: "User NGO roster updated successfully." });
     } catch (error) {
@@ -1032,25 +920,17 @@ const cleanupDeletedNgoInternalController = async (req: Request, res: Response):
                 (item) => item.ngoId.toString() !== ngoId.toString()
             );
 
-            // 2. Recalculate global system role (preserve SUPER_ADMIN status)
-            if (user.role !== "SUPER_ADMIN") {
-                const isStillAdminElsewhere = user.joinedNGOs.some(
-                    (item) => item.roleInNGO === "NGO_ADMIN"
-                );
-
-                if (isStillAdminElsewhere) {
-                    user.role = "NGO_ADMIN";
-                } else if (user.joinedNGOs.length > 0) {
-                    user.role = "NGO_WORKER";
-                } else {
-                    user.role = "RESIDENT";
-                }
+            if (user.ngoId?.toString() === ngoId.toString()) {
+                user.ngoId = null;
             }
+
+            // 2. Recalculate global system role (preserves SUPER_ADMIN)
+            recalcGlobalRole(user);
 
             await user.save();
 
-            // 3. Purge individual user profile cache from Redis
-            await safeRedis.del(RedisKeys.userProfile(user._id.toString()));
+            // 3. Refresh individual user profile cache
+            await cacheUserProfile(user);
         });
 
         await Promise.all(savePromises);

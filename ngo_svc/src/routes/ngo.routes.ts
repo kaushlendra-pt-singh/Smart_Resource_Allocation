@@ -1,4 +1,5 @@
 import express from "express";
+import mongoose from "mongoose";
 import rateLimiter from "../middlewares/rateLimit.middleware";
 
 import {
@@ -24,6 +25,17 @@ import { optionalAuth } from "../middlewares/optionalAuth";
 import { verifyInternalKey } from "../middlewares/verufyInternalKey";
 
 const ngoRouter = express.Router();
+
+// Reject malformed ids up front (otherwise Mongo throws a CastError -> 500)
+const validateObjectIdParam = (req: express.Request, res: express.Response, next: express.NextFunction, value: string) => {
+    if (!mongoose.Types.ObjectId.isValid(value)) {
+        return res.status(400).json({ status: "failed", message: `Invalid id: ${value}` });
+    }
+    next();
+};
+ngoRouter.param("ngoId", validateObjectIdParam);
+ngoRouter.param("memberId", validateObjectIdParam);
+ngoRouter.param("userId", validateObjectIdParam);
 
 // ==========================================
 // 1. Internal Interservice Routes (No Rate Limiter)

@@ -8,7 +8,8 @@ declare global {
         _id: string;
         role: string;
         email: string;
-        ngoId: string;
+        ngoId?: string | null; // NGO this user owns
+        joinedNGOs?: { ngoId: string; roleInNGO: string }[];
       };
     }
   }

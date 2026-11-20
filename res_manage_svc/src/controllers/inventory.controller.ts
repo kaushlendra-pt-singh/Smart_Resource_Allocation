@@ -7,6 +7,7 @@ import { Resource } from "../models/resource.model";
 import { safeRedis } from "../config/redis";
 import { RedisKeys } from "../utils/redisKeys";
 import { isValidCoordinates } from "../utils/validateCords";
+import { adminNgoIds, isAdminOf, isStaffOf } from "../utils/access";
 
 type StockFields = { totalQuantity: number; reservedQuantity?: number; allocatedQuantity?: number };
 
@@ -40,16 +41,34 @@ export const restockInventory = async (req: Request, res: Response): Promise<Res
 
     try {
         const { ngoId: bodyNgoId, resourceId, warehouseName, address, city, state, coordinates, quantity, notes } = req.body;
-        const performedBy = req.user!._id; // from token, never from the body
-        // SUPER_ADMIN may restock any NGO (must send ngoId); an NGO_ADMIN can only restock their own NGO
-        const ngoId = req.user!.role === "SUPER_ADMIN" ? bodyNgoId : req.user!.ngoId;
+        const user = req.user!;
+        const performedBy = user._id; // from token, never from the body
+
+        // Which NGO's warehouse is restocked:
+        //  - body.ngoId if given (SUPER_ADMIN must always send it)
+        //  - otherwise the NGO the user owns, or their only admin NGO
+        const myAdminNgos = adminNgoIds(user);
+        const ngoId: string | undefined =
+            bodyNgoId ||
+            (user.ngoId && isAdminOf(user, user.ngoId) ? user.ngoId : undefined) ||
+            (myAdminNgos.length === 1 ? myAdminNgos[0] : undefined);
 
         if (!ngoId || !resourceId || !warehouseName || !city || !state || !quantity) {
             await session.abortTransaction();
             session.endSession();
             return res.status(400).json({
                 status: "failed",
-                message: "ngoId, resourceId, warehouseName, city, state, quantity, and performedBy are required."
+                message: "resourceId, warehouseName, city, state and quantity are required (and ngoId when you admin more than one NGO, or are a super admin)."
+            });
+        }
+
+        // Any admin of the target NGO (not only its owner) may restock it
+        if (!isAdminOf(user, String(ngoId))) {
+            await session.abortTransaction();
+            session.endSession();
+            return res.status(403).json({
+                status: "failed",
+                message: "You can only restock warehouses of an NGO you are an admin of."
             });
         }
 
@@ -83,7 +102,7 @@ export const restockInventory = async (req: Request, res: Response): Promise<Res
         }
 
         const existingInventory = await Inventory.findOne({
-            ngoId,
+            ngoId: String(ngoId),
             resourceId,
             warehouseName: warehouseName.trim()
         }).session(session);
@@ -153,6 +172,7 @@ export const restockInventory = async (req: Request, res: Response): Promise<Res
                     stockPayload,
                     { EX: 86400 }
                 ),
+                safeRedis.del(RedisKeys.allocationResourceIndex(String(resourceId))),
                 // REMOVED: safeRedis.incrBy(resourceGlobalAvailableCount ...)
                 // It drifts as soon as holds exist (reserve/cancel never touched it). Search the project for
                 // resourceGlobalAvailableCount: if nothing reads it, delete the key from redisKeys.ts too.
@@ -330,8 +350,8 @@ export const dispatchInventory = async (req: Request, res: Response): Promise<Re
         if (!inventory) {
             return await fail(404, `Inventory document with ID ${inventoryId} not found.`);
         }
-        if (user.role !== "SUPER_ADMIN" && inventory.ngoId !== user.ngoId) {
-            return await fail(403, "Only the owning NGO's admin or a super admin can dispatch directly. Other NGOs must use allocation.");
+        if (!isStaffOf(user, inventory.ngoId)) {
+            return await fail(403, "Only the owning NGO's admins/workers or a super admin can dispatch directly. Other NGOs must use allocation.");
         }
 
         // 3. Atomic: only unallocated stock may leave (total - allocated >= quantity)
@@ -375,7 +395,8 @@ export const dispatchInventory = async (req: Request, res: Response): Promise<Re
             const payload = buildStockPayload(updated);
             await Promise.all([
                 safeRedis.set(RedisKeys.inventoryStock(idStr), payload, { EX: 86400 }),
-                safeRedis.set(RedisKeys.warehouseResourceStock(updated.warehouseName, updated.resourceId.toString()), payload, { EX: 86400 })
+                safeRedis.set(RedisKeys.warehouseResourceStock(updated.warehouseName, updated.resourceId.toString()), payload, { EX: 86400 }),
+                safeRedis.del(RedisKeys.allocationResourceIndex(updated.resourceId.toString()))
             ]);
         } catch (cacheErr) {
             console.error("Redis sync failed after dispatch (cache refreshes on TTL):", cacheErr);
@@ -425,7 +446,7 @@ export const getInventoryLedger = async (req: Request, res: Response): Promise<R
             });
         }
 
-        if (req.user?.role !== "SUPER_ADMIN" && inventoryDoc.ngoId !== req.user?.ngoId) {
+        if (!isAdminOf(req.user, inventoryDoc.ngoId)) {
             return res.status(403).json({
                 status: "failed",
                 message: "You can only view the ledger of your own NGO's inventory."

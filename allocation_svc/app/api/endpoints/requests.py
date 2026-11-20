@@ -26,6 +26,7 @@ from pydantic import BaseModel, Field
 
 from app.core.config import settings
 from app.core.security import require_ngo_worker
+from app.core import access
 from app.services import request_store as store
 from app.services.optimizer import invalidate_stock_cache
 from app.services.res_client import res_client
@@ -39,38 +40,22 @@ class NoteBody(BaseModel):
 
 
 # --------------------------------------------------------------------------- helpers
-def _uid(user: Dict[str, Any]) -> str:
-    return str(user.get("_id") or user.get("userId") or "unknown")
-
-
-def _role(user: Dict[str, Any]) -> str:
-    return str(user.get("role", "")).upper()
-
-
-def _ngo(user: Dict[str, Any]) -> str:
-    return str(user.get("ngoId") or "")
-
-
-def _is_super(user: Dict[str, Any]) -> bool:
-    return _role(user) == "SUPER_ADMIN"
-
-
-def _is_admin_of(user: Dict[str, Any], ngo_id: str) -> bool:
-    return _role(user) == "NGO_ADMIN" and bool(_ngo(user)) and _ngo(user) == ngo_id
-
-
-def _is_staff_of(user: Dict[str, Any], ngo_id: str) -> bool:
-    return _role(user) in {"NGO_ADMIN", "NGO_WORKER"} and bool(_ngo(user)) and _ngo(user) == ngo_id
+# Per-NGO rights come from the token's joinedNGOs (see app/core/access.py): any admin of an NGO can
+# decide on that NGO's lines, not only its owner.
+_uid = access.uid
+_is_super = access.is_super
+_is_admin_of = access.is_admin_of
+_is_staff_of = access.is_staff_of
 
 
 def _can_see(user: Dict[str, Any], doc: Dict[str, Any]) -> bool:
     if _is_super(user):
         return True
-    my_ngo = _ngo(user)
-    if not my_ngo:
+    my_ngos = access.staff_ngo_ids(user)
+    if not my_ngos:
         return False
-    return doc.get("requesterNgoId") == my_ngo or any(
-        l.get("ngoId") == my_ngo for l in doc.get("lines", [])
+    return doc.get("requesterNgoId") in my_ngos or any(
+        l.get("ngoId") in my_ngos for l in doc.get("lines", [])
     )
 
 
@@ -84,10 +69,10 @@ def _iso(value: Any) -> Any:
 
 def _present(doc: Dict[str, Any], user: Dict[str, Any]) -> Dict[str, Any]:
     """The requester sees every line; an owner NGO only sees the lines on its own warehouses."""
-    my_ngo = _ngo(user)
-    sees_all = _is_super(user) or (bool(my_ngo) and doc.get("requesterNgoId") == my_ngo)
+    my_ngos = access.staff_ngo_ids(user)
+    sees_all = _is_super(user) or doc.get("requesterNgoId") in my_ngos
     all_lines = doc.get("lines", [])
-    lines = all_lines if sees_all else [l for l in all_lines if l.get("ngoId") == my_ngo]
+    lines = all_lines if sees_all else [l for l in all_lines if l.get("ngoId") in my_ngos]
     return {
         "referenceId": doc.get("referenceId"),
         "requesterNgoId": doc.get("requesterNgoId"),
@@ -139,6 +124,7 @@ async def list_requests(
         "mine", description="mine = requested by my NGO, incoming = lines on my NGO's warehouses, all = super admin only"
     ),
     line_status: Optional[str] = Query(None, alias="status", description="Filter by line status"),
+    ngo_id: Optional[str] = Query(None, alias="ngoId", description="Narrow to one of your NGOs"),
     page: int = Query(1, ge=1),
     limit: int = Query(20, ge=1, le=100),
     user: Dict[str, Any] = Depends(require_ngo_worker),
@@ -147,20 +133,26 @@ async def list_requests(
     if st and st not in store.LINE_STATUSES:
         raise HTTPException(status_code=400, detail=f"status must be one of {sorted(store.LINE_STATUSES)}")
 
-    my_ngo = _ngo(user)
+    my_ngos = access.staff_ngo_ids(user)
+    if ngo_id:
+        if not _is_staff_of(user, ngo_id):
+            raise HTTPException(status_code=403, detail="You are not an admin or worker of that NGO.")
+        my_ngos = {ngo_id}
+
     if view == "all":
         if not _is_super(user):
             raise HTTPException(status_code=403, detail="Only a super admin can list all requests.")
         query: Dict[str, Any] = {"lines.status": st} if st else {}
     else:
-        if not my_ngo:
-            raise HTTPException(status_code=403, detail="Your token has no ngoId.")
+        if not my_ngos:
+            raise HTTPException(status_code=403, detail="You are not an admin or worker of any NGO.")
+        ngo_list = sorted(my_ngos)
         if view == "mine":
-            query = {"requesterNgoId": my_ngo}
+            query = {"requesterNgoId": {"$in": ngo_list}}
             if st:
                 query["lines.status"] = st
         else:  # incoming
-            match: Dict[str, Any] = {"ngoId": my_ngo}
+            match: Dict[str, Any] = {"ngoId": {"$in": ngo_list}}
             if st:
                 match["status"] = st
             query = {"lines": {"$elemMatch": match}}
@@ -232,7 +224,7 @@ async def approve_line(
                 performed_by=uid,
             )
         await _revert(reference_id, line_id, store.PENDING)
-        await invalidate_stock_cache([(line["resourceId"], line["warehouseName"])])
+        await invalidate_stock_cache([line["inventoryId"]])
         raise _error_from(resp, "Could not reserve stock.")
 
     # 3. record the decision
@@ -258,7 +250,7 @@ async def approve_line(
             detail="Stock was reserved but the request could not be updated. Contact an administrator.",
         )
 
-    await invalidate_stock_cache([(line["resourceId"], line["warehouseName"])])
+    await invalidate_stock_cache([line["inventoryId"]])
     return await _ok("Line approved and stock is on hold.", reference_id, user)
 
 
@@ -347,7 +339,7 @@ async def cancel_line(
         raise _error_from(resp, "Could not release the hold.")
 
     await store.set_line_status(reference_id, line_id, [store.PROCESSING], store.CANCELLED, extra)
-    await invalidate_stock_cache([(line["resourceId"], line["warehouseName"])])
+    await invalidate_stock_cache([line["inventoryId"]])
     return await _ok("Line cancelled and stock released.", reference_id, user)
 
 
@@ -398,5 +390,5 @@ async def dispatch_line(
         raise _error_from(resp, "Could not dispatch.")
 
     await store.set_line_status(reference_id, line_id, [store.PROCESSING], store.DISPATCHED)
-    await invalidate_stock_cache([(line["resourceId"], line["warehouseName"])])
+    await invalidate_stock_cache([line["inventoryId"]])
     return await _ok("Dispatched. Stock has left the warehouse.", reference_id, user)

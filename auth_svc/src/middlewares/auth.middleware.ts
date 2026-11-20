@@ -44,11 +44,24 @@ export default async function authMiddleware(req: Request, res: Response, next: 
             return res.status(401).json({ status: "failed", message: "User account no longer exists." });
         }
 
+        // Same shape as toUserPayload in user.controller (minus nothing sensitive: passwordHash is select:false)
         const userPayload = {
             _id: user._id.toString(),
+            name: user.name,
             email: user.email,
+            phone: user.phone || null,
             role: user.role,
-            ngoId: user.ngoId?.toString()
+            profilePic: user.profilePic,
+            ngoId: user.ngoId ? user.ngoId.toString() : null,
+            joinedNGOs: (user.joinedNGOs ?? []).map((j: any) => ({
+                ngoId: j.ngoId.toString(),
+                roleInNGO: j.roleInNGO
+            })),
+            verificationStatus: user.verificationStatus,
+            isActive: user.isActive,
+            isGoogleUser: user.isGoogleUser,
+            createdAt: user.createdAt,
+            updatedAt: user.updatedAt
         };
 
         // Re-prime profile cache in Redis (24 Hour TTL)

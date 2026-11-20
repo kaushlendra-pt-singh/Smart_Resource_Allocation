@@ -6,20 +6,20 @@ export async function authMiddleWare(req: Request, res: Response, next: NextFunc
         const token = req.cookies?.accessToken || req.headers.authorization?.split(" ")[1];
         if (!token) return res.status(401).json({ message: "User not authorized!" });
 
-        // 1. Update the expected JWT payload structure
         const decoded = jwt.verify(token, process.env.JWT_ACCESS_SECRET!) as {
             _id: string;
             role: string;
             email: string;
-            ngoId: string;
+            ngoId?: string | null;
+            joinedNGOs?: { ngoId: string; roleInNGO: string }[];
         };
 
-        // 2. Map the array to the req.user object
         req.user = {
-            _id: decoded._id, // Aligned with the JWT payload
+            _id: decoded._id,
             role: decoded.role,
             email: decoded.email,
-            ngoId: decoded.ngoId
+            ngoId: decoded.ngoId || null, // NGO this user owns
+            joinedNGOs: Array.isArray(decoded.joinedNGOs) ? decoded.joinedNGOs : [] // per-NGO roles
         };
 
         next();

@@ -18,5 +18,9 @@ export const RedisKeys = {
 
     // 6. Temporary Allocation Lock Key (Prevents race conditions during multi-step reservation)
     // Value: allocationId / referenceId | TTL: e.g., 5-10 minutes
-    reservationLock: (inventoryId: string) => `lock:inventory:${inventoryId}:reservation`
+    reservationLock: (inventoryId: string) => `lock:inventory:${inventoryId}:reservation`,
+
+    // 7. allocation_svc's "cache is complete" index for a resource (see allocation_svc optimizer._index_key).
+    // Deleting it after any stock change here forces allocation_svc to re-read MongoDB. Keep names in sync.
+    allocationResourceIndex: (resourceId: string) => `alloc:idx:res:${resourceId}:inventories`
 };

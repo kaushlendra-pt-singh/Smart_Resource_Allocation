@@ -20,6 +20,7 @@ from app.services.res_client import res_client
 from app.services import request_store as store
 from app.core.security import require_ngo_worker
 from app.core.config import settings
+from app.core import access
 
 logger = logging.getLogger(settings.APP_NAME)
 router = APIRouter()
@@ -56,7 +57,7 @@ async def _release_holds(holds: List[Dict[str, Any]], reference_id: str, reason:
             )
 
     # Stock changed -> drop cached stock so the next request re-reads fresh data.
-    await invalidate_stock_cache([(h["resourceId"], h["warehouseName"]) for h in holds])
+    await invalidate_stock_cache([h["inventoryId"] for h in holds])
     return failed
 
 
@@ -70,9 +71,29 @@ async def allocate_resources(
     request: AllocationRequest,
     current_user: Dict[str, Any] = Depends(require_ngo_worker)
 ):
-    user_id = current_user.get("_id") or current_user.get("userId")
-    user_role = current_user.get("role", "USER")
-    requester_ngo_id = current_user.get("ngoId") or request.requesterNgoId or ""
+    user_id = access.uid(current_user)
+    user_role = access.role(current_user)
+
+    # Which NGO is asking: explicit requesterNgoId, else the NGO the user owns, else their only NGO.
+    # The user must be admin/worker of that NGO (super admin may act for any NGO, or for none).
+    my_ngos = access.staff_ngo_ids(current_user)
+    owned = access.owned_ngo(current_user)
+    requester_ngo_id = (
+        request.requesterNgoId
+        or (owned if owned in my_ngos else "")
+        or (next(iter(my_ngos)) if len(my_ngos) == 1 else "")
+    )
+    if not access.is_super(current_user):
+        if not requester_ngo_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="requesterNgoId is required (you are a member of several NGOs, or of none).",
+            )
+        if not access.is_staff_of(current_user, requester_ngo_id):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You can only request allocations for an NGO you are an admin or worker of.",
+            )
 
     reference_id = f"ALLOC-{uuid.uuid4().hex[:8].upper()}"
     logger.info(f"[allocation] User {user_id} requested allocation ref: {reference_id} for NGO: {requester_ngo_id}")
@@ -105,7 +126,7 @@ async def allocate_resources(
                 target_location=request.targetLocation,
                 candidates=candidates,
                 preferred_warehouse_name=item.preferredWarehouseName,
-                user_role=user_role,
+                user=current_user,
                 allow_partial_fulfillment=request.allowPartialFulfillment,
             )
 
@@ -128,7 +149,7 @@ async def allocate_resources(
                         quantity=qty,
                         reference_id=reference_id,
                         reason=f"Disaster hold ref: {reference_id} by user: {user_id}",
-                        include_owner_reserve=has_owner_tier(warehouse_ngo_id, requester_ngo_id, user_role),
+                        include_owner_reserve=has_owner_tier(warehouse_ngo_id, current_user),
                     )
 
                     if reserve_resp.get("status") == "success":
@@ -181,7 +202,7 @@ async def allocate_resources(
                                 quantity=qty,
                                 reason=rollback_reason,
                             )
-                            await invalidate_stock_cache([(item.resourceId, alloc["warehouseName"])])
+                            await invalidate_stock_cache([inventory_id])
                 else:
                     # External NGO warehouse: plan created as PENDING, waiting for owner NGO approval
                     line_dict = store.new_line(
@@ -273,7 +294,7 @@ async def allocate_resources(
     else:
         # Reservations that stand changed stock -> refresh cache on next read.
         if holds:
-            await invalidate_stock_cache([(h["resourceId"], h["warehouseName"]) for h in holds])
+            await invalidate_stock_cache([h["inventoryId"] for h in holds])
 
         total_allocated_all = sum(r.totalAllocatedQuantity for r in item_results)
         total_held_all = sum(r.heldQuantity for r in item_results)

@@ -6,54 +6,79 @@ import { safeRedis } from "../config/redis";
 import { RedisKeys } from "../utils/redisKeys";
 import axios from "axios";
 
+const internalHeaders = () => ({ "x-internal-key": process.env.INTERNAL_API_KEY });
+
 interface BulkVerificationPayload {
     ngoIds: string[];
     status: "APPROVED" | "REJECTED";
     adminUserId: string;
 }
 
+// Same rules as verifyNGOController: only PENDING NGOs are processed, and on approval the
+// founder is promoted in auth_svc FIRST (an NGO is never APPROVED while its founder isn't an admin).
 export const bulkNgoVerificationWorker = new Worker(
     BULK_NGO_VERIFICATION_QUEUE,
     async (job: Job<BulkVerificationPayload>) => {
         const { ngoIds, status } = job.data;
         console.log(`[Worker] Starting batch verification for ${ngoIds.length} NGOs. Target Status: ${status}`);
 
-        let approvedCount = 0;
+        let processedCount = 0;
+        const skipped: { ngoId: string; reason: string }[] = [];
 
         for (const ngoId of ngoIds) {
             try {
-                // 1. Update MongoDB
-                const updatedNgo = await ngoModel.findByIdAndUpdate(
-                    ngoId,
-                    { verificationStatus: status },
-                    { new: true }
-                );
-
-                if (updatedNgo) {
-                    // 2. Refresh Redis Detail Cache
-                    await safeRedis.set(
-                        RedisKeys.ngoDetails(ngoId),
-                        JSON.stringify(updatedNgo.toObject()),
-                        { EX: 86400 }
-                    );
-                    approvedCount++;
+                const ngo = await ngoModel.findById(ngoId);
+                if (!ngo) {
+                    skipped.push({ ngoId, reason: "not found" });
+                    continue;
                 }
+                if (ngo.verificationStatus !== "PENDING") {
+                    skipped.push({ ngoId, reason: `already ${ngo.verificationStatus}` });
+                    continue;
+                }
+
+                if (status === "APPROVED") {
+                    try {
+                        await axios.patch(
+                            `${process.env.AUTH_SERVICE_URL}/api/auth/internal/promote-founder`,
+                            { userId: ngo.adminId, ngoId: ngo._id },
+                            { headers: internalHeaders(), timeout: 8000 }
+                        );
+                    } catch (authErr: any) {
+                        skipped.push({ ngoId, reason: authErr.response?.data?.message || authErr.message });
+                        continue;
+                    }
+
+                    if (!ngo.ngoAdmins.some((id) => id.toString() === ngo.adminId.toString())) {
+                        ngo.ngoAdmins.push(ngo.adminId);
+                    }
+                }
+
+                ngo.verificationStatus = status;
+                await ngo.save();
+
+                await safeRedis.set(RedisKeys.ngoDetails(ngoId), JSON.stringify(ngo.toObject()), { EX: 86400 });
+                await safeRedis.decr(RedisKeys.pendingNgoCount());
+
+                if (status === "APPROVED" && ngo.location?.coordinates) {
+                    const [lng, lat] = ngo.location.coordinates;
+                    await safeRedis.geoAdd(RedisKeys.ngoLocations(), lng, lat, ngoId);
+                } else if (status === "REJECTED") {
+                    await safeRedis.zrem(RedisKeys.ngoLocations(), ngoId);
+                }
+
+                processedCount++;
             } catch (err) {
                 console.error(`[Worker] Failed to verify NGO ${ngoId}:`, err);
+                skipped.push({ ngoId, reason: "internal error" });
             }
         }
 
-        // 3. Update Pending Count in Redis
-        if (approvedCount > 0) {
-            const currentCount = await safeRedis.get(RedisKeys.pendingNgoCount());
-            if (currentCount) {
-                const newCount = Math.max(0, parseInt(currentCount) - approvedCount);
-                await safeRedis.set(RedisKeys.pendingNgoCount(), newCount.toString());
-            }
-        }
-
-        console.log(`[Worker] Batch verification finished. Successfully processed ${approvedCount}/${ngoIds.length} NGOs.`);
-        return { processedCount: approvedCount };
+        console.log(
+            `[Worker] Batch verification finished. Processed ${processedCount}/${ngoIds.length} NGOs.`,
+            skipped.length ? { skipped } : ""
+        );
+        return { processedCount, skipped };
     },
     { connection: redisConnectionOptions }
 );
@@ -90,15 +115,20 @@ export const bulkNgoDeletionWorker = new Worker(
                     ])
                 );
 
-                // 2. Cascade Sync with auth_svc to strip roles & clear joinedNGOs
+                // 2. Cascade Sync with auth_svc FIRST (same fail-fast rule as deleteNgoController):
+                //    never delete the NGO while users still carry it in joinedNGOs / ngoId.
                 try {
                     await axios.post(
-                        `${process.env.AUTH_SERVICE_URL}/internal/ngos/cleanup-deleted-ngo`,
+                        `${process.env.AUTH_SERVICE_URL}/api/auth/internal/ngos/cleanup-deleted-ngo`,
                         { ngoId, memberIds: allMemberIds },
-                        { headers: { "x-interservice-token": process.env.INTERNAL_API_KEY } }
+                        { headers: internalHeaders(), timeout: 8000 }
                     );
                 } catch (authError: any) {
-                    console.error(`[Worker] Failed to sync NGO ${ngoId} cleanup with auth_svc:`, authError.message);
+                    console.error(
+                        `[Worker] Skipping NGO ${ngoId}: auth_svc cleanup failed:`,
+                        authError.response?.data?.message || authError.message
+                    );
+                    continue;
                 }
 
                 // 3. Delete from MongoDB
@@ -106,6 +136,10 @@ export const bulkNgoDeletionWorker = new Worker(
 
                 // 4. Purge Redis Cache
                 await safeRedis.del(RedisKeys.ngoDetails(ngoId));
+                await safeRedis.zrem(RedisKeys.ngoLocations(), ngoId);
+                if (ngoDoc.verificationStatus === "PENDING") {
+                    await safeRedis.decr(RedisKeys.pendingNgoCount());
+                }
                 deletedCount++;
 
             } catch (err) {
