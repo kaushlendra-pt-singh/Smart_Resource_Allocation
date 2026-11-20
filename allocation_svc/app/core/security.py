@@ -27,7 +27,7 @@ async def verify_internal_key(
     Used on internal system endpoints accessed by other microservices.
     """
     if not x_internal_key or x_internal_key != settings.INTERNAL_API_KEY:
-        logger.warning(f"[security] Invalid or missing internal API key: {x_internal_key}")
+        logger.warning(f"[security] Invalid or missing internal API key.")
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Access denied: Invalid or missing x-internal-key header."

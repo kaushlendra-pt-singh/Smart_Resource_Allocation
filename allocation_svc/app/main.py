@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
 from app.core.db import connect_to_mongo, close_mongo_connection
 from app.core.redis import check_redis_health
+from app.services.request_store import create_indexes
 from app.api.router import api_v1_router
 from app.api.endpoints.health import health_check
 
@@ -18,6 +19,7 @@ logger = logging.getLogger(settings.APP_NAME)
 async def lifespan(app: FastAPI):
     logger.info(f"Starting {settings.APP_NAME}...")
     await connect_to_mongo()
+    await create_indexes()
     redis_healthy = await check_redis_health()
     if redis_healthy:
         logger.info("[redis] Connected successfully to Redis.")

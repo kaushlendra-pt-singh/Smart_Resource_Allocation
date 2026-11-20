@@ -12,12 +12,13 @@ class Settings(BaseSettings):
     # Service Connections
     MONGODB_URI: str = "mongodb://localhost:27017/res_manage_db"
     RES_MANAGE_SVC_URL: str = "http://localhost:8002"
+    RES_MANAGE_SERVICE_URL: str = "http://localhost:8002"
     REDIS_URL: str = "redis://localhost:6379/0"
     REDIS_HOST: str = "localhost"
     REDIS_PORT: int = 6379
     REDIS_PASSWORD: str = ""
     REDIS_DB: int = 0
 
-    model_config = SettingsConfigDict(env_file="../../.env", extra="ignore")
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 settings = Settings()

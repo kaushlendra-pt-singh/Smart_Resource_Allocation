@@ -17,6 +17,7 @@ from app.services.optimizer import (
     optimizer,
 )
 from app.services.res_client import res_client
+from app.services import request_store as store
 from app.core.security import require_ngo_worker
 from app.core.config import settings
 
@@ -71,17 +72,18 @@ async def allocate_resources(
 ):
     user_id = current_user.get("_id") or current_user.get("userId")
     user_role = current_user.get("role", "USER")
-    requester_ngo_id = current_user.get("ngoId", "")
+    requester_ngo_id = current_user.get("ngoId") or request.requesterNgoId or ""
 
     reference_id = f"ALLOC-{uuid.uuid4().hex[:8].upper()}"
     logger.info(f"[allocation] User {user_id} requested allocation ref: {reference_id} for NGO: {requester_ngo_id}")
 
-    # Strict mode = all-or-nothing: every item must be fully reserved, else everything is released.
+    # Strict mode = all-or-nothing: every item must be fully reserved/planned, else everything is released.
     strict = not request.allowPartialFulfillment
     rollback_reason = f"Rollback of allocation ref: {reference_id}"
 
     holds: List[Dict[str, Any]] = []  # every CONFIRMED reservation made in this request
     item_results: List[ItemAllocationResult] = []
+    all_saved_lines: List[Dict[str, Any]] = []
     has_partial = False
     has_failure = False
 
@@ -107,61 +109,112 @@ async def allocate_resources(
                 allow_partial_fulfillment=request.allowPartialFulfillment,
             )
 
-            reserved_breakdowns: List[WarehouseAllocationBreakdown] = []
+            breakdowns: List[WarehouseAllocationBreakdown] = []
 
-            # 3. Reserve allocated stock
+            # 3. Process allocated stock per warehouse
             for alloc in opt_result.allocations:
-                qty_to_reserve = alloc["allocatedQuantity"]
+                qty = alloc["allocatedQuantity"]
                 inventory_id = alloc["inventoryId"]
+                warehouse_ngo_id = alloc["ngoId"]
+                is_own_wh = alloc["isOwnNgoWarehouse"]
 
-                reserve_resp = await res_client.reserve_stock(
-                    inventory_id=inventory_id,
-                    quantity=qty_to_reserve,
-                    reference_id=reference_id,
-                    reason=f"Disaster hold ref: {reference_id} by user: {user_id}",
-                    include_owner_reserve=has_owner_tier(alloc["ngoId"], requester_ngo_id, user_role),
-                )
+                # Own NGO warehouse or Super Admin -> auto-approve and hold immediately.
+                # External NGO warehouse -> PENDING approval from the owning NGO (nothing held yet).
+                auto_approve = is_own_wh or user_role == "SUPER_ADMIN"
 
-                if reserve_resp.get("status") == "success":
-                    holds.append(
-                        {
-                            "inventoryId": inventory_id,
-                            "warehouseName": alloc["warehouseName"],
-                            "resourceId": item.resourceId,
-                            "quantity": qty_to_reserve,
-                        }
+                if auto_approve:
+                    reserve_resp = await res_client.reserve_stock(
+                        inventory_id=inventory_id,
+                        quantity=qty,
+                        reference_id=reference_id,
+                        reason=f"Disaster hold ref: {reference_id} by user: {user_id}",
+                        include_owner_reserve=has_owner_tier(warehouse_ngo_id, requester_ngo_id, user_role),
                     )
-                    reserved_breakdowns.append(
+
+                    if reserve_resp.get("status") == "success":
+                        holds.append(
+                            {
+                                "inventoryId": inventory_id,
+                                "warehouseName": alloc["warehouseName"],
+                                "resourceId": item.resourceId,
+                                "quantity": qty,
+                            }
+                        )
+                        line_dict = store.new_line(
+                            resource_id=item.resourceId,
+                            inventory_id=inventory_id,
+                            warehouse_name=alloc["warehouseName"],
+                            ngo_id=warehouse_ngo_id,
+                            quantity=qty,
+                            distance_km=alloc["distanceKm"],
+                            coordinates=alloc["warehouseCoordinates"],
+                            status=store.APPROVED,
+                        )
+                        line_dict["decidedAt"] = store.utcnow()
+                        line_dict["decidedBy"] = str(user_id)
+                        line_dict["note"] = "Auto-approved own warehouse allocation"
+                        all_saved_lines.append(line_dict)
+
+                        breakdowns.append(
+                            WarehouseAllocationBreakdown(
+                                inventoryId=inventory_id,
+                                warehouseName=alloc["warehouseName"],
+                                ngoId=warehouse_ngo_id,
+                                isOwnNgoWarehouse=is_own_wh,
+                                allocatedQuantity=qty,
+                                distanceKm=alloc["distanceKm"],
+                                warehouseCoordinates=alloc["warehouseCoordinates"],
+                                lineId=line_dict["lineId"],
+                                lineStatus=store.APPROVED,
+                            )
+                        )
+                    else:
+                        logger.error(
+                            f"[allocation] Reservation failed for inventory {inventory_id}: "
+                            f"{reserve_resp.get('message')}"
+                        )
+                        has_failure = True
+                        if reserve_resp.get("ambiguous"):
+                            await res_client.cancel_reservation(
+                                inventory_id=inventory_id,
+                                reference_id=reference_id,
+                                quantity=qty,
+                                reason=rollback_reason,
+                            )
+                            await invalidate_stock_cache([(item.resourceId, alloc["warehouseName"])])
+                else:
+                    # External NGO warehouse: plan created as PENDING, waiting for owner NGO approval
+                    line_dict = store.new_line(
+                        resource_id=item.resourceId,
+                        inventory_id=inventory_id,
+                        warehouse_name=alloc["warehouseName"],
+                        ngo_id=warehouse_ngo_id,
+                        quantity=qty,
+                        distance_km=alloc["distanceKm"],
+                        coordinates=alloc["warehouseCoordinates"],
+                        status=store.PENDING,
+                    )
+                    all_saved_lines.append(line_dict)
+
+                    breakdowns.append(
                         WarehouseAllocationBreakdown(
                             inventoryId=inventory_id,
                             warehouseName=alloc["warehouseName"],
-                            ngoId=alloc["ngoId"],
-                            isOwnNgoWarehouse=alloc["isOwnNgoWarehouse"],
-                            allocatedQuantity=qty_to_reserve,
+                            ngoId=warehouse_ngo_id,
+                            isOwnNgoWarehouse=is_own_wh,
+                            allocatedQuantity=qty,
                             distanceKm=alloc["distanceKm"],
                             warehouseCoordinates=alloc["warehouseCoordinates"],
+                            lineId=line_dict["lineId"],
+                            lineStatus=store.PENDING,
                         )
                     )
-                else:
-                    logger.error(
-                        f"[allocation] Reservation failed for inventory {inventory_id}: "
-                        f"{reserve_resp.get('message')}"
-                    )
-                    has_failure = True
-                    if reserve_resp.get("ambiguous"):
-                        # Outcome unknown (timeout / 5xx): make sure nothing stays held.
-                        # Result intentionally ignored - cancel may legitimately fail if
-                        # the reservation never happened.
-                        await res_client.cancel_reservation(
-                            inventory_id=inventory_id,
-                            reference_id=reference_id,
-                            quantity=qty_to_reserve,
-                            reason=rollback_reason,
-                        )
-                        await invalidate_stock_cache([(item.resourceId, alloc["warehouseName"])])
 
-            total_held = sum(b.allocatedQuantity for b in reserved_breakdowns)
-            is_fully = total_held >= item.requestedQuantity
+            held_qty = sum(b.allocatedQuantity for b in breakdowns if b.lineStatus == store.APPROVED)
+            pending_qty = sum(b.allocatedQuantity for b in breakdowns if b.lineStatus == store.PENDING)
+            total_allocated = held_qty + pending_qty
+            is_fully = total_allocated >= item.requestedQuantity
+
             if not is_fully:
                 has_partial = True
 
@@ -169,9 +222,11 @@ async def allocate_resources(
                 ItemAllocationResult(
                     resourceId=item.resourceId,
                     requestedQuantity=item.requestedQuantity,
-                    totalAllocatedQuantity=total_held,
+                    totalAllocatedQuantity=total_allocated,
                     isFullyAllocated=is_fully,
-                    allocations=reserved_breakdowns,
+                    heldQuantity=held_qty,
+                    pendingQuantity=pending_qty,
+                    allocations=breakdowns,
                 )
             )
 
@@ -198,6 +253,8 @@ async def allocate_resources(
                 requestedQuantity=i.requestedQuantity,
                 totalAllocatedQuantity=0,
                 isFullyAllocated=False,
+                heldQuantity=0,
+                pendingQuantity=0,
                 allocations=[],
             )
             for i in request.items
@@ -215,9 +272,13 @@ async def allocate_resources(
         ) + rollback_note
     else:
         # Reservations that stand changed stock -> refresh cache on next read.
-        await invalidate_stock_cache([(h["resourceId"], h["warehouseName"]) for h in holds])
+        if holds:
+            await invalidate_stock_cache([(h["resourceId"], h["warehouseName"]) for h in holds])
 
         total_allocated_all = sum(r.totalAllocatedQuantity for r in item_results)
+        total_held_all = sum(r.heldQuantity for r in item_results)
+        total_pending_all = sum(r.pendingQuantity for r in item_results)
+
         if total_allocated_all == 0:
             overall_status = "failed"
             msg = (
@@ -225,12 +286,35 @@ async def allocate_resources(
                 if has_failure
                 else "No stock available to satisfy the request."
             )
-        elif has_partial or has_failure:
-            overall_status = "partial_success"
-            msg = "Partial allocation completed. Some requested items could not be fully satisfied."
         else:
-            overall_status = "success"
-            msg = "Successfully allocated and reserved requested resources."
+            # Persist allocation request to MongoDB allocation_requests collection
+            if all_saved_lines:
+                req_doc = {
+                    "referenceId": reference_id,
+                    "requesterNgoId": requester_ngo_id,
+                    "requestedBy": str(user_id),
+                    "requesterRole": user_role,
+                    "createdAt": store.utcnow(),
+                    "items": [
+                        {"resourceId": it.resourceId, "requestedQuantity": it.requestedQuantity}
+                        for it in request.items
+                    ],
+                    "lines": all_saved_lines,
+                }
+                await store.create_request(req_doc)
+
+            if total_pending_all > 0 and total_held_all == 0:
+                overall_status = "pending_approval"
+                msg = "Allocation request created and awaiting approval from owning NGO(s)."
+            elif total_pending_all > 0 and total_held_all > 0:
+                overall_status = "partial_success"
+                msg = "Own resources reserved; external allocations are pending approval from owning NGO(s)."
+            elif has_partial or has_failure:
+                overall_status = "partial_success"
+                msg = "Partial allocation completed. Some requested items could not be fully satisfied."
+            else:
+                overall_status = "success"
+                msg = "Successfully allocated and reserved requested resources."
 
     return AllocationResponse(
         status=overall_status,

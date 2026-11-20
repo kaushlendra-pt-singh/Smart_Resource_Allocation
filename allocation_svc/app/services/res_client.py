@@ -23,7 +23,8 @@ class ResServiceClient:
     """
 
     def __init__(self):
-        self.base_url = settings.RES_MANAGE_SVC_URL.rstrip("/")
+        url = settings.RES_MANAGE_SERVICE_URL or settings.RES_MANAGE_SVC_URL
+        self.base_url = url.rstrip("/")
         self.headers = {
             "Content-Type": "application/json",
             "x-internal-key": settings.INTERNAL_API_KEY,

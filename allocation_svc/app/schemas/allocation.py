@@ -19,7 +19,9 @@ class AllocationItemRequest(BaseModel):
 
 
 class AllocationRequest(BaseModel):
-    requesterNgoId: Optional[str] = Field(..., description="ID of the NGO making the request")
+    requesterNgoId: Optional[str] = Field(
+        default=None, description="ID of the NGO making the request"
+    )
     items: List[AllocationItemRequest] = Field(
         ..., min_length=1, description="List of items to allocate"
     )
@@ -28,7 +30,7 @@ class AllocationRequest(BaseModel):
         description="Target coordinates [longitude, latitude]. Required if preferred warehouse alone cannot fulfill request.",
     )
     maxSearchRadiusKm: float = Field(
-        default=50.0, gt=0, le=500.0, description="Search radius in kilometers"
+        default=50.0, gt=0, le=3000.0, description="Search radius in kilometers"
     )
     allowPartialFulfillment: bool = Field(
         default=True,

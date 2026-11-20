@@ -60,7 +60,9 @@ class WarehouseCandidate:
         - Owner tier (owner NGO_ADMIN / SUPER_ADMIN): total - allocated
         - Everyone else: total - allocated - reserved (available_quantity)
         """
-        return max(0, self.total_quantity - self.allocated_quantity)
+        if has_owner_tier(self.ngo_id, requesting_ngo_id, user_role):
+            return max(0, self.total_quantity - self.allocated_quantity)
+        return max(0, self.total_quantity - self.allocated_quantity - self.reserved_quantity)
 
 
 class OptimizationResult:
