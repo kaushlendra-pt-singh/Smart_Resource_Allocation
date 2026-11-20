@@ -98,10 +98,18 @@ docker compose ps
 - Point your domain (Route 53 alias) at the ALB. Restrict the instance's port 80 to the ALB's security group.
 - Set `TRUST_PROXY_HOPS=2` (ALB + nginx) in a root `.env` file next to `docker-compose.yml`, then `docker compose up -d`.
 
-**B. Certbot on the instance (cheapest, no load balancer)**
-- Point the domain's A record at the Elastic IP.
-- Add a TLS server block to `frontend/nginx.conf` and mount Let's Encrypt certificates into the gateway
-  (or put Caddy in front, which handles certificates automatically). Keep `TRUST_PROXY_HOPS=1`.
+**B. Caddy on the instance (free, automatic certificates) — what this repo ships**
+- Point the domain at the Elastic IP (a free DuckDNS subdomain works).
+- Create a root `.env` next to `docker-compose.yml`:
+  ```
+  COMPOSE_FILE=docker-compose.yml:docker-compose.https.yml
+  DOMAIN=smart-allocate.duckdns.org
+  NODE_ENV=production
+  TRUST_PROXY_HOPS=2
+  ```
+- `docker compose up -d --build`. Caddy (in `docker-compose.https.yml`) takes ports 80/443, fetches the
+  certificate on first start, renews it automatically and redirects http to https. The gateway is no longer published.
+- Certificates are stored in the `caddy-data` volume: don't delete it (`docker compose down -v` would).
 
 ### 3.5 Updating
 ```bash

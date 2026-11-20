@@ -1,0 +1,11 @@
+# HTTPS front door. Caddy gets and renews a free certificate (Let's Encrypt, ZeroSSL as fallback)
+# for $DOMAIN, redirects http -> https, and forwards everything to the nginx gateway.
+# DOMAIN comes from the root .env, e.g. DOMAIN=smart-allocate.duckdns.org
+
+{$DOMAIN} {
+	encode zstd gzip
+
+	header Strict-Transport-Security "max-age=31536000"
+
+	reverse_proxy gateway:80
+}

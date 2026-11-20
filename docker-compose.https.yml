@@ -1,0 +1,38 @@
+# Adds HTTPS on a real server. Use together with docker-compose.yml by putting this in the root .env:
+#
+#   COMPOSE_FILE=docker-compose.yml:docker-compose.https.yml
+#   DOMAIN=smart-allocate.duckdns.org
+#   NODE_ENV=production
+#   TRUST_PROXY_HOPS=2
+#
+# Caddy owns ports 80/443; the gateway is no longer published and only Caddy can reach it.
+
+services:
+  caddy:
+    image: caddy:2.10-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      DOMAIN: ${DOMAIN:?Set DOMAIN in the root .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data # certificates live here: keep this volume
+      - caddy-config:/config
+    depends_on:
+      gateway:
+        condition: service_healthy
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  gateway:
+    ports: !reset []
+
+volumes:
+  caddy-data:
+  caddy-config:
